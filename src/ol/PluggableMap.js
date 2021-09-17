@@ -143,6 +143,11 @@ import {removeNode} from './dom.js';
  */
 
 /**
+ * @fires import("./MapBrowserEvent.js").MapBrowserEvent
+ * @fires import("./MapEvent.js").MapEvent
+ * @fires import("./render/Event.js").default#precompose
+ * @fires import("./render/Event.js").default#postcompose
+ * @fires import("./render/Event.js").default#rendercomplete
  * @api
  */
 class PluggableMap extends BaseObject {
@@ -153,12 +158,12 @@ class PluggableMap extends BaseObject {
     super();
 
     /***
-     * @type {PluggableMapOnSignature<import("./Observable.js").OnReturn>}
+     * @type {PluggableMapOnSignature<import("./events").EventsKey>}
      */
     this.on;
 
     /***
-     * @type {PluggableMapOnSignature<import("./Observable.js").OnReturn>}
+     * @type {PluggableMapOnSignature<import("./events").EventsKey>}
      */
     this.once;
 

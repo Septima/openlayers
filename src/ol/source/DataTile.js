@@ -23,10 +23,10 @@ import {getUid} from '../util.js';
  * @property {import("../tilegrid/TileGrid.js").default} [tileGrid] Tile grid.
  * @property {boolean} [opaque=false] Whether the layer is opaque.
  * @property {import("./State.js").default} [state] The source state.
- * @property {number} [cacheSize] Number of tiles to retain in the cache.
  * @property {number} [tilePixelRatio] Tile pixel ratio.
  * @property {boolean} [wrapX=true] Render tiles beyond the antimeridian.
  * @property {number} [transition] Transition time when fading in new tiles (in miliseconds).
+ * @property {number} [bandCount=4] Number of bands represented in the data.
  */
 
 /**
@@ -56,7 +56,7 @@ class DataTileSource extends TileSource {
     }
 
     super({
-      cacheSize: options.cacheSize,
+      cacheSize: 0.1, // don't cache on the source
       projection: projection,
       tileGrid: tileGrid,
       opaque: options.opaque,
@@ -82,7 +82,7 @@ class DataTileSource extends TileSource {
     /**
      * @type {number}
      */
-    this.bandCount = 4; // assume RGBA
+    this.bandCount = options.bandCount === undefined ? 4 : options.bandCount; // assume RGBA if undefined
   }
 
   /**

@@ -5,10 +5,11 @@ import DataTile from './DataTile.js';
 import State from './State.js';
 import TileGrid from '../tilegrid/TileGrid.js';
 import {Pool, fromUrl as tiffFromUrl, fromUrls as tiffFromUrls} from 'geotiff';
+import {Projection, get as getCachedProjection} from '../proj.js';
 import {create as createDecoderWorker} from '../worker/geotiff-decoder.js';
 import {getIntersection} from '../extent.js';
-import {get as getProjection} from '../proj.js';
 import {toSize} from '../size.js';
+import {fromCode as unitsFromCode} from '../proj/Units.js';
 
 /**
  * @typedef {Object} SourceInfo
@@ -20,9 +21,33 @@ import {toSize} from '../size.js';
  * the configured min and max.
  * @property {number} [nodata] Values to discard. When provided, an additional band (alpha) will be added
  * to the data.
- * @property {Array<number>} [bands] Indices of the bands to be read from. If not provided, all bands will
- * be read. If, for example, a GeoTIFF has red, green, blue and near-infrared bands and you only need the
- * infrared band, configure `bands: [3]`.
+ * @property {Array<number>} [bands] Band numbers to be read from (where the first band is `1`). If not provided, all bands will
+ * be read. For example, if a GeoTIFF has blue (1), green (2), red (3), and near-infrared (4) bands, and you only need the
+ * near-infrared band, configure `bands: [4]`.
+ */
+
+/**
+ * @typedef {Object} GeoKeys
+ * @property {number} GTModelTypeGeoKey Model type.
+ * @property {number} GTRasterTypeGeoKey Raster type.
+ * @property {number} GeogAngularUnitsGeoKey Angular units.
+ * @property {number} GeogInvFlatteningGeoKey Inverse flattening.
+ * @property {number} GeogSemiMajorAxisGeoKey Semi-major axis.
+ * @property {number} GeographicTypeGeoKey Geographic coordinate system code.
+ * @property {number} ProjLinearUnitsGeoKey Projected linear unit code.
+ * @property {number} ProjectedCSTypeGeoKey Projected coordinate system code.
+ */
+
+/**
+ * @typedef {Object} GeoTIFFImage
+ * @property {Object} fileDirectory The file directory.
+ * @property {GeoKeys} geoKeys The parsed geo-keys.
+ * @property {boolean} littleEndian Uses little endian byte order.
+ * @property {Object} tiles The tile cache.
+ * @property {boolean} isTiled The image is tiled.
+ * @property {function():Array<number>} getBoundingBox Get the image bounding box.
+ * @property {function():Array<number>} getOrigin Get the image origin.
+ * @property {function(GeoTIFFImage):Array<number>} getResolution Get the image resolution.
  */
 
 let workerPool;
@@ -31,6 +56,95 @@ function getWorkerPool() {
     workerPool = new Pool(undefined, createDecoderWorker());
   }
   return workerPool;
+}
+
+/**
+ * Get the bounding box of an image.  If the image does not have an affine transform,
+ * the pixel bounds are returned.
+ * @param {GeoTIFFImage} image The image.
+ * @return {Array<number>} The image bounding box.
+ */
+function getBoundingBox(image) {
+  try {
+    return image.getBoundingBox();
+  } catch (_) {
+    const fileDirectory = image.fileDirectory;
+    return [0, 0, fileDirectory.ImageWidth, fileDirectory.ImageLength];
+  }
+}
+
+/**
+ * Get the origin of an image.  If the image does not have an affine transform,
+ * the top-left corner of the pixel bounds is returned.
+ * @param {GeoTIFFImage} image The image.
+ * @return {Array<number>} The image origin.
+ */
+function getOrigin(image) {
+  try {
+    return image.getOrigin().slice(0, 2);
+  } catch (_) {
+    return [0, image.fileDirectory.ImageLength];
+  }
+}
+
+/**
+ * Get the resolution of an image.  If the image does not have an affine transform,
+ * the width of the image is compared with the reference image.
+ * @param {GeoTIFFImage} image The image.
+ * @param {GeoTIFFImage} referenceImage The reference image.
+ * @return {number} The image resolution.
+ */
+function getResolution(image, referenceImage) {
+  try {
+    return image.getResolution(referenceImage)[0];
+  } catch (_) {
+    return (
+      referenceImage.fileDirectory.ImageWidth / image.fileDirectory.ImageWidth
+    );
+  }
+}
+
+/**
+ * @param {GeoTIFFImage} image A GeoTIFF.
+ * @return {import("../proj/Projection.js").default} The image projection.
+ */
+function getProjection(image) {
+  const geoKeys = image.geoKeys;
+  if (!geoKeys) {
+    return null;
+  }
+
+  if (geoKeys.ProjectedCSTypeGeoKey) {
+    const code = 'EPSG:' + geoKeys.ProjectedCSTypeGeoKey;
+    let projection = getCachedProjection(code);
+    if (!projection) {
+      const units = unitsFromCode(geoKeys.ProjLinearUnitsGeoKey);
+      if (units) {
+        projection = new Projection({
+          code: code,
+          units: units,
+        });
+      }
+    }
+    return projection;
+  }
+
+  if (geoKeys.GeographicTypeGeoKey) {
+    const code = 'EPSG:' + geoKeys.GeographicTypeGeoKey;
+    let projection = getCachedProjection(code);
+    if (!projection) {
+      const units = unitsFromCode(geoKeys.GeogAngularUnitsGeoKey);
+      if (units) {
+        projection = new Projection({
+          code: code,
+          units: units,
+        });
+      }
+    }
+    return projection;
+  }
+
+  return null;
 }
 
 /**
@@ -141,12 +255,18 @@ function getMaxForDataType(array) {
  * @typedef {Object} Options
  * @property {Array<SourceInfo>} sources List of information about GeoTIFF sources.
  * Multiple sources can be combined when their resolution sets are equal after applying a scale.
- * The list of sources defines a mapping between input bands as they are read from each GeoTIFF, and
+ * The list of sources defines a mapping between input bands as they are read from each GeoTIFF and
  * the output bands that are provided by data tiles. To control which bands to read from each GeoTIFF,
- * use the {@link import("./GeoTIFF.js").SourceInfo bands} property. If, for example, you spedify two
+ * use the {@link import("./GeoTIFF.js").SourceInfo bands} property. If, for example, you specify two
  * sources, one with 3 bands and {@link import("./GeoTIFF.js").SourceInfo nodata} configured, and
  * another with 1 band, the resulting data tiles will have 5 bands: 3 from the first source, 1 alpha
  * band from the first source, and 1 band from the second source.
+ * @property {boolean} [convertToRGB = false] By default, bands from the sources are read as-is. When
+ * reading GeoTIFFs with the purpose of displaying them as RGB images, setting this to `true` will
+ * convert other color spaces (YCbCr, CMYK) to RGB.
+ * @property {boolean} [opaque=false] Whether the layer is opaque.
+ * @property {number} [transition=250] Duration of the opacity transition for rendering.
+ * To disable the opacity transition, pass `transition: 0`.
  */
 
 /**
@@ -163,6 +283,8 @@ class GeoTIFFSource extends DataTile {
       state: State.LOADING,
       tileGrid: null,
       projection: null,
+      opaque: options.opaque,
+      transition: options.transition,
     });
     
     /**
@@ -212,6 +334,12 @@ class GeoTIFFSource extends DataTile {
      * @private
      */
     this.error_ = null;
+
+    /**
+     * @type {'readRasters' | 'readRGB'}
+     */
+    this.readMethod_ = options.convertToRGB ? 'readRGB' : 'readRasters';
+
     this.setKey(this.sourceInfo_.map((source) => source.url).join(','));
 
     const self = this;
@@ -224,6 +352,7 @@ class GeoTIFFSource extends DataTile {
         self.configure_(sources);
       })
       .catch(function (error) {
+        console.error(error); // eslint-disable-line no-console
         self.error_ = error;
         self.setState(State.ERROR);
       });
@@ -283,32 +412,17 @@ class GeoTIFFSource extends DataTile {
           ? wantedSamples.length
           : image.getSamplesPerPixel();
         const level = imageCount - (imageIndex + 1);
-        if (!sourceExtent && !this.test_) {
-          sourceExtent = image.getBoundingBox();
-        } else if(this.test_ && !sourceExtent){
-          // Test using the same sourceExtent as the image dimensions. 
-          // This could perhaps also be taken from the source 
-          sourceExtent = [0,
-                          0,
-                          image.fileDirectory.ImageWidth,
-                          image.fileDirectory.ImageLength];
+
+        if (!sourceExtent) {
+          sourceExtent = getBoundingBox(image);
         }
-        if (!sourceOrigin && !this.test_) {
-          sourceOrigin = image.getOrigin().slice(0, 2);
-        } else if (this.test_ && !sourceOrigin) {
-          // Put the origin in the top left corner, so it works with the image
-          sourceOrigin = [0,image.fileDirectory.ImageLength];
+
+        if (!sourceOrigin) {
+          sourceOrigin = getOrigin(image);
         }
-        
-        if(this.test_){
-          // Grab the resolutions from the tiles inside the fileDirectory. 
-          sourceResolutions[level] = images[0].fileDirectory.ImageWidth / image.fileDirectory.ImageWidth; // 1,1 / (level + 1 )
-          sourceTileSizes[level] = [image.fileDirectory.TileWidth,image.fileDirectory.TileLength] // 1024 ( should work )
-        } else {
-          sourceResolutions[level] = image.getResolution(images[0])[0]; // 1,1 / (level + 1 )
-          sourceTileSizes[level] = [image.getTileWidth(), image.getTileHeight()]; // 1024 ( should work )
-          
-        }
+
+        sourceResolutions[level] = getResolution(image, images[0]);
+        sourceTileSizes[level] = [image.getTileWidth(), image.getTileHeight()];
       }
       if (!extent) {
         extent = sourceExtent;
@@ -368,13 +482,13 @@ class GeoTIFFSource extends DataTile {
     }
 
     if (!this.getProjection()) {
-      const firstImage = sources[0][0];
-      if (firstImage.geoKeys) {
-        const code =
-          firstImage.geoKeys.ProjectedCSTypeGeoKey ||
-          firstImage.geoKeys.GeographicTypeGeoKey;
-        if (code) {
-          this.projection = getProjection(`EPSG:${code}`);
+      const firstSource = sources[0];
+      for (let i = firstSource.length - 1; i >= 0; --i) {
+        const image = firstSource[i];
+        const projection = getProjection(image);
+        if (projection) {
+          this.projection = projection;
+          break;
         }
       }
     }
@@ -396,7 +510,7 @@ class GeoTIFFSource extends DataTile {
       const bands = this.sourceInfo_[sourceIndex].bands;
       if (bands) {
         for (let i = 0; i < bands.length; ++i) {
-          if (!isNaN(values[bands[i]])) {
+          if (!isNaN(values[bands[i] - 1])) {
             this.addAlpha_ = true;
             break outer;
           }
@@ -452,13 +566,20 @@ class GeoTIFFSource extends DataTile {
         Math.round((y + 1) * (size[1] * resolutionFactor)),
       ];
       const image = this.sourceImagery_[sourceIndex][z];
-      requests[sourceIndex] = image.readRasters({
+      let samples;
+      if (source.bands) {
+        samples = source.bands.map(function (bandNumber) {
+          return bandNumber - 1;
+        });
+      }
+      requests[sourceIndex] = image[this.readMethod_]({
         window: pixelBounds,
         width: size[0],
         height: size[1],
-        samples: source.bands,
+        samples: samples,
         fillValue: source.nodata,
         pool: getWorkerPool(),
+        interleave: false,
       });
     }
 
@@ -501,7 +622,7 @@ class GeoTIFFSource extends DataTile {
               if (nodata === undefined) {
                 let bandIndex;
                 if (source.bands) {
-                  bandIndex = source.bands[sampleIndex];
+                  bandIndex = source.bands[sampleIndex] - 1;
                 } else {
                   bandIndex = sampleIndex;
                 }
