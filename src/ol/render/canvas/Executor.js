@@ -13,14 +13,11 @@ import {
 import {createEmpty, createOrUpdate, intersects} from '../../extent.js';
 import {
   defaultPadding,
+  defaultTextAlign,
   defaultTextBaseline,
   drawImageOrLabel,
-} from '../canvas.js';
-import {
-  defaultTextAlign,
+  getTextDimensions,
   measureAndCacheTextWidth,
-  measureTextHeight,
-  measureTextWidths,
 } from '../canvas.js';
 import {drawTextOnPath} from '../../geom/flat/textpath.js';
 import {equals} from '../../array.js';
@@ -102,6 +99,20 @@ function horizontalTextAlign(text, align) {
     align = align === 'start' ? 'left' : 'right';
   }
   return TEXT_ALIGN[align];
+}
+
+/**
+ * @param {Array<string>} acc Accumulator.
+ * @param {string} line Line of text.
+ * @param {number} i Index
+ * @return {Array<string>} Accumulator.
+ */
+function createTextChunks(acc, line, i) {
+  if (i > 0) {
+    acc.push('\n', '');
+  }
+  acc.push(line, '');
+  return acc;
 }
 
 class Executor {
@@ -208,7 +219,7 @@ class Executor {
   }
 
   /**
-   * @param {string} text Text.
+   * @param {string|Array<string>} text Text.
    * @param {string} textKey Text style key.
    * @param {string} fillKey Fill style key.
    * @param {string} strokeKey Stroke style key.
@@ -227,19 +238,24 @@ class Executor {
       textState.scale[0] * pixelRatio,
       textState.scale[1] * pixelRatio,
     ];
-    const align = horizontalTextAlign(
-      text,
-      textState.textAlign || defaultTextAlign
-    );
+    const textIsArray = Array.isArray(text);
+    const align = textState.justify
+      ? TEXT_ALIGN[textState.justify]
+      : horizontalTextAlign(
+          Array.isArray(text) ? text[0] : text,
+          textState.textAlign || defaultTextAlign
+        );
     const strokeWidth =
       strokeKey && strokeState.lineWidth ? strokeState.lineWidth : 0;
 
-    const lines = text.split('\n');
-    const numLines = lines.length;
-    const widths = [];
-    const width = measureTextWidths(textState.font, lines, widths);
-    const lineHeight = measureTextHeight(textState.font);
-    const height = lineHeight * numLines;
+    const chunks = textIsArray
+      ? text
+      : text.split('\n').reduce(createTextChunks, []);
+
+    const {width, height, widths, heights, lineWidths} = getTextDimensions(
+      textState,
+      chunks
+    );
     const renderWidth = width + strokeWidth;
     const contextInstructions = [];
     // make canvas 2 pixels wider to account for italic text width measurement errors
@@ -254,7 +270,6 @@ class Executor {
     if (scale[0] != 1 || scale[1] != 1) {
       contextInstructions.push('scale', scale);
     }
-    contextInstructions.push('font', textState.font);
     if (strokeKey) {
       contextInstructions.push('strokeStyle', strokeState.strokeStyle);
       contextInstructions.push('lineWidth', strokeWidth);
@@ -274,26 +289,52 @@ class Executor {
     contextInstructions.push('textBaseline', 'middle');
     contextInstructions.push('textAlign', 'center');
     const leftRight = 0.5 - align;
-    const x = align * renderWidth + leftRight * strokeWidth;
-    let i;
-    if (strokeKey) {
-      for (i = 0; i < numLines; ++i) {
-        contextInstructions.push('strokeText', [
-          lines[i],
-          x + leftRight * widths[i],
-          0.5 * (strokeWidth + lineHeight) + i * lineHeight,
-        ]);
+    let x = align * renderWidth + leftRight * strokeWidth;
+    const strokeInstructions = [];
+    const fillInstructions = [];
+    let lineHeight = 0;
+    let lineOffset = 0;
+    let widthHeightIndex = 0;
+    let lineWidthIndex = 0;
+    let previousFont;
+    for (let i = 0, ii = chunks.length; i < ii; i += 2) {
+      const text = chunks[i];
+      if (text === '\n') {
+        lineOffset += lineHeight;
+        lineHeight = 0;
+        x = align * renderWidth + leftRight * strokeWidth;
+        ++lineWidthIndex;
+        continue;
       }
-    }
-    if (fillKey) {
-      for (i = 0; i < numLines; ++i) {
-        contextInstructions.push('fillText', [
-          lines[i],
-          x + leftRight * widths[i],
-          0.5 * (strokeWidth + lineHeight) + i * lineHeight,
-        ]);
+      const font = chunks[i + 1] || textState.font;
+      if (font !== previousFont) {
+        if (strokeKey) {
+          strokeInstructions.push('font', font);
+        }
+        if (fillKey) {
+          fillInstructions.push('font', font);
+        }
+        previousFont = font;
       }
+      lineHeight = Math.max(lineHeight, heights[widthHeightIndex]);
+      const fillStrokeArgs = [
+        text,
+        x +
+          leftRight * widths[widthHeightIndex] +
+          align * (widths[widthHeightIndex] - lineWidths[lineWidthIndex]),
+        0.5 * (strokeWidth + lineHeight) + lineOffset,
+      ];
+      x += widths[widthHeightIndex];
+      if (strokeKey) {
+        strokeInstructions.push('strokeText', fillStrokeArgs);
+      }
+      if (fillKey) {
+        fillInstructions.push('fillText', fillStrokeArgs);
+      }
+      ++widthHeightIndex;
     }
+    Array.prototype.push.apply(contextInstructions, strokeInstructions);
+    Array.prototype.push.apply(contextInstructions, fillInstructions);
     this.labels_[key] = label;
     return label;
   }
@@ -552,7 +593,7 @@ class Executor {
 
   /**
    * @private
-   * @param {string} text The text to draw.
+   * @param {string|Array<string>} text The text to draw.
    * @param {string} textKey The key of the text state.
    * @param {string} strokeKey The key for the stroke state.
    * @param {string} fillKey The key for the fill state.
@@ -566,7 +607,7 @@ class Executor {
     const strokeState = this.strokeStates[strokeKey];
     const pixelRatio = this.pixelRatio;
     const align = horizontalTextAlign(
-      text,
+      Array.isArray(text) ? text[0] : text,
       textState.textAlign || defaultTextAlign
     );
     const baseline = TEXT_ALIGN[textState.textBaseline || defaultTextBaseline];
@@ -767,17 +808,21 @@ class Executor {
             instruction[12]
           );
           let width = /** @type {number} */ (instruction[13]);
-          const declutterImageWithText =
-            /** @type {import("../canvas.js").DeclutterImageWithText} */ (
+          const declutterMode =
+            /** @type {"declutter"|"obstacle"|"none"|undefined} */ (
               instruction[14]
             );
+          const declutterImageWithText =
+            /** @type {import("../canvas.js").DeclutterImageWithText} */ (
+              instruction[15]
+            );
 
-          if (!image && instruction.length >= 19) {
+          if (!image && instruction.length >= 20) {
             // create label images
-            text = /** @type {string} */ (instruction[18]);
-            textKey = /** @type {string} */ (instruction[19]);
-            strokeKey = /** @type {string} */ (instruction[20]);
-            fillKey = /** @type {string} */ (instruction[21]);
+            text = /** @type {string} */ (instruction[19]);
+            textKey = /** @type {string} */ (instruction[20]);
+            strokeKey = /** @type {string} */ (instruction[21]);
+            fillKey = /** @type {string} */ (instruction[22]);
             const labelWithAnchor = this.drawLabelWithPointPlacement_(
               text,
               textKey,
@@ -786,10 +831,10 @@ class Executor {
             );
             image = labelWithAnchor.label;
             instruction[3] = image;
-            const textOffsetX = /** @type {number} */ (instruction[22]);
+            const textOffsetX = /** @type {number} */ (instruction[23]);
             anchorX = (labelWithAnchor.anchorX - textOffsetX) * this.pixelRatio;
             instruction[4] = anchorX;
-            const textOffsetY = /** @type {number} */ (instruction[23]);
+            const textOffsetY = /** @type {number} */ (instruction[24]);
             anchorY = (labelWithAnchor.anchorY - textOffsetY) * this.pixelRatio;
             instruction[5] = anchorY;
             height = image.height;
@@ -799,15 +844,15 @@ class Executor {
           }
 
           let geometryWidths;
-          if (instruction.length > 24) {
-            geometryWidths = /** @type {number} */ (instruction[24]);
+          if (instruction.length > 25) {
+            geometryWidths = /** @type {number} */ (instruction[25]);
           }
 
           let padding, backgroundFill, backgroundStroke;
-          if (instruction.length > 16) {
-            padding = /** @type {Array<number>} */ (instruction[15]);
-            backgroundFill = /** @type {boolean} */ (instruction[16]);
-            backgroundStroke = /** @type {boolean} */ (instruction[17]);
+          if (instruction.length > 17) {
+            padding = /** @type {Array<number>} */ (instruction[16]);
+            backgroundFill = /** @type {boolean} */ (instruction[17]);
+            backgroundStroke = /** @type {boolean} */ (instruction[18]);
           } else {
             padding = defaultPadding;
             backgroundFill = false;
@@ -861,39 +906,43 @@ class Executor {
                 ? /** @type {Array<*>} */ (lastStrokeInstruction)
                 : null,
             ];
-            let imageArgs;
-            let imageDeclutterBox;
-            if (opt_declutterTree && declutterImageWithText) {
-              const index = dd - d;
-              if (!declutterImageWithText[index]) {
-                // We now have the image for an image+text combination.
-                declutterImageWithText[index] = args;
-                // Don't render anything for now, wait for the text.
-                continue;
-              }
-              imageArgs = declutterImageWithText[index];
-              delete declutterImageWithText[index];
-              imageDeclutterBox = getDeclutterBox(imageArgs);
-              if (opt_declutterTree.collides(imageDeclutterBox)) {
-                continue;
-              }
-            }
-            if (
-              opt_declutterTree &&
-              opt_declutterTree.collides(dimensions.declutterBox)
-            ) {
-              continue;
-            }
-            if (imageArgs) {
-              // We now have image and text for an image+text combination.
-              if (opt_declutterTree) {
-                opt_declutterTree.insert(imageDeclutterBox);
-              }
-              // Render the image before we render the text.
-              this.replayImageOrLabel_.apply(this, imageArgs);
-            }
             if (opt_declutterTree) {
-              opt_declutterTree.insert(dimensions.declutterBox);
+              if (declutterMode === 'none') {
+                // not rendered in declutter group
+                continue;
+              } else if (declutterMode === 'obstacle') {
+                // will always be drawn, thus no collision detection, but insert as obstacle
+                opt_declutterTree.insert(dimensions.declutterBox);
+                continue;
+              } else {
+                let imageArgs;
+                let imageDeclutterBox;
+                if (declutterImageWithText) {
+                  const index = dd - d;
+                  if (!declutterImageWithText[index]) {
+                    // We now have the image for an image+text combination.
+                    declutterImageWithText[index] = args;
+                    // Don't render anything for now, wait for the text.
+                    continue;
+                  }
+                  imageArgs = declutterImageWithText[index];
+                  delete declutterImageWithText[index];
+                  imageDeclutterBox = getDeclutterBox(imageArgs);
+                  if (opt_declutterTree.collides(imageDeclutterBox)) {
+                    continue;
+                  }
+                }
+                if (opt_declutterTree.collides(dimensions.declutterBox)) {
+                  continue;
+                }
+                if (imageArgs) {
+                  // We now have image and text for an image+text combination.
+                  opt_declutterTree.insert(imageDeclutterBox);
+                  // Render the image before we render the text.
+                  this.replayImageOrLabel_.apply(this, imageArgs);
+                }
+                opt_declutterTree.insert(dimensions.declutterBox);
+              }
             }
             this.replayImageOrLabel_.apply(this, args);
           }

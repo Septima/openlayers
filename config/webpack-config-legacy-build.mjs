@@ -48,6 +48,7 @@ export default {
   },
   output: {
     path: path.resolve('./build/legacy'),
+    publicPath: 'auto',
     filename: 'ol.js',
     library: 'ol',
     libraryTarget: 'umd',

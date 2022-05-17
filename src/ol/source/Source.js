@@ -31,6 +31,8 @@ import {get as getProjection} from '../proj.js';
  * @property {import("../proj.js").ProjectionLike} [projection] Projection. Default is the view projection.
  * @property {import("./State.js").default} [state='ready'] State.
  * @property {boolean} [wrapX=false] WrapX.
+ * @property {boolean} [interpolate=false] Use interpolated values when resampling.  By default,
+ * the nearest neighbor is used when resampling.
  */
 
 /**
@@ -52,7 +54,7 @@ class Source extends BaseObject {
 
     /**
      * @protected
-     * @type {import("../proj/Projection.js").default}
+     * @type {import("../proj/Projection.js").default|null}
      */
     this.projection = getProjection(options.projection);
 
@@ -90,6 +92,34 @@ class Source extends BaseObject {
      * @type {boolean}
      */
     this.wrapX_ = options.wrapX !== undefined ? options.wrapX : false;
+
+    /**
+     * @private
+     * @type {boolean}
+     */
+    this.interpolate_ = !!options.interpolate;
+
+    /**
+     * @protected
+     * @type {function(import("../View.js").ViewOptions):void}
+     */
+    this.viewResolver = null;
+
+    /**
+     * @protected
+     * @type {function(Error):void}
+     */
+    this.viewRejector = null;
+
+    const self = this;
+    /**
+     * @private
+     * @type {Promise<import("../View.js").ViewOptions>}
+     */
+    this.viewPromise_ = new Promise(function (resolve, reject) {
+      self.viewResolver = resolve;
+      self.viewRejector = reject;
+    });
   }
 
   /**
@@ -111,7 +141,7 @@ class Source extends BaseObject {
 
   /**
    * Get the projection of the source.
-   * @return {import("../proj/Projection.js").default} Projection.
+   * @return {import("../proj/Projection.js").default|null} Projection.
    * @api
    */
   getProjection() {
@@ -120,10 +150,17 @@ class Source extends BaseObject {
 
   /**
    * @abstract
-   * @return {Array<number>|undefined} Resolutions.
+   * @return {Array<number>|null} Resolutions.
    */
   getResolutions() {
     return abstract();
+  }
+
+  /**
+   * @return {Promise<import("../View.js").ViewOptions>} A promise for view-related properties.
+   */
+  getView() {
+    return this.viewPromise_;
   }
 
   /**
@@ -143,10 +180,10 @@ class Source extends BaseObject {
   }
 
   /**
-   * @return {Object|undefined} Context options.
+   * @return {boolean} Use linear interpolation when resampling.
    */
-  getContextOptions() {
-    return undefined;
+  getInterpolate() {
+    return this.interpolate_;
   }
 
   /**
@@ -182,7 +219,7 @@ class Source extends BaseObject {
 /**
  * Turns the attributions option into an attributions function.
  * @param {AttributionLike|undefined} attributionLike The attribution option.
- * @return {?Attribution} An attribution function (or null).
+ * @return {Attribution|null} An attribution function (or null).
  */
 function adaptAttributions(attributionLike) {
   if (!attributionLike) {

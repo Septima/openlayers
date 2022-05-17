@@ -1,5 +1,95 @@
 ## Upgrade notes
 
+### Next Release
+
+#### Deprecated `tilePixelRatio` option for data tile sources.
+
+If you were previously trying to scale data tiles using the `tilePixelRatio` property for data tile sources (this is rare), you should now use the explicit `tileSize` and `tileGrid` properties.  The source's `tileSize` represents the source tile dimensions and the tile grid's `tileSize` represents the desired rendered dimensions.
+
+```js
+const source = new DataTileSource({
+  tileSize: [512, 512], // source tile size
+  tileGrid: createXYZ({tileSize: [256, 256]}), // rendered tile size
+});
+```
+
+#### Fixed coordinate dimension handling in `ol/proj`'s `addCoordinateTransforms`
+
+The `forward` and `inverse` functions passed to `addCooordinateTransforms` now receive a coordinate with all dimensions of the original coordinate, not just two. If you previosly had coordinates with more than two dimensions and added a transform like
+```js
+addCoordinateTransforms(
+    'EPSG:4326',
+    new Projection({code: 'latlong', units: 'degrees'}),
+    function(coordinate) { return coordinate.reverse(); },
+    function(coordinate) { return coordinate.reverse(); }
+);
+```
+you have to change that to
+```js
+addCoordinateTransforms(
+    'EPSG:4326',
+    new Projection({code: 'latlong', units: 'degrees'}),
+    function(coordinate) { return coordinate.slice(0, 2).reverse() },
+    function(coordinate) { return coordinate.slice(0, 2).reverse() }
+);
+```
+
+### v6.14.0
+
+No special changes are required when upgrading to the 6.14.0 release.
+
+### v6.13.0
+
+#### New `layer.getData()` method
+
+Raster layers (static images, image tiles, data tiles) have a new `layer.getData(pixel)` method that returns the pixel data at the provided location.  The return value depends on the underlying source data type.  For example, a GeoTIFF may return a `Float32Array` with one value per band, while a PNG rendered from a tile layer will return a `Uint8ClampedArray` of RGBA values.
+
+If you were previously using the `map.forEachLayerAtPixel()` method, you should use the new `layer.getData()` method instead.  The old method returns composite pixel values from multiple layers and is limited to RGBA values.  The new method doesn't suffer from these shortcomings and is more performant.
+
+#### Deprecated `map.forEachLayerAtPixel()` method
+
+The `map.forEachLayerAtPixel()` method has been deprecated.  It will be removed (or its behavior may change) in the next major release.  Please use the `layer.getData()` method instead.
+
+### v6.12.0
+
+No special changes are required when upgrading to the 6.12.0 release.
+
+### v6.11.0
+
+No special changes are required when upgrading to the 6.11.0 release.
+
+### v6.10.0
+
+#### New `interpolate` option for sources
+
+Sources now have an `interpolate` option.  This option controls whether data from the source is interpolated when resampling.
+
+For `ol/source/DataTile` sources, the default is `interpolate: false`.  This means that when a data tile source is used with a WebGL tile layer renderer, your style expression will have access to pixel values in the data tiles without interpolation.  If this option is set to true, linear interpolation will be used when over- or under-sampling the data.
+
+#### Deprecation of the `imageSmoothing` option for sources
+
+The `imageSmoothing` option for sources has been deprecated and will be removed in the next major release.  Use the `interpolate` option instead.
+
+```js
+// if you were using `imageSmoothing`
+const before = new TileSource({
+  imageSmoothing: false
+});
+
+// use the `interpolate` option instead
+const after = new TileSource({
+  interpolate: false
+});
+```
+
+### v6.9.0
+
+There should be nothing special required when upgrading from v6.8 to v6.9.
+
+### v6.8.0
+
+There should be nothing special required when upgrading from v6.7 to v6.8.
+
 ### v6.7.0
 
 There should be nothing special required when upgrading from v6.6 to v6.7.

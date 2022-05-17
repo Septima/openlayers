@@ -67,8 +67,9 @@
     <link rel="stylesheet" href="./resources/prism/prism-1.20.0.css" type="text/css">
     <link rel="stylesheet" href="./css/ol.css" type="text/css">
     <link rel="stylesheet" href="./resources/layout.css" type="text/css">
-    <script src="https://unpkg.com/elm-pep"></script>
-    <script src="https://cdn.polyfill.io/v3/polyfill.min.js?features=fetch,requestAnimationFrame,Element.prototype.classList,URL,TextDecoder,Number.isInteger"></script>
+    <script src="https://unpkg.com/elm-pep@1.0.6/dist/elm-pep.js"></script>
+    <script src="https://cdn.polyfill.io/v3/polyfill.min.js?features=fetch,requestAnimationFrame,Element.prototype.classList,TextDecoder"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/core-js/3.18.3/minified.js"></script>
     {{{ extraHead.local }}}
     {{{ css.tag }}}
     <title>{{ title }}</title>
@@ -180,8 +181,7 @@
 
       <div class="row-fluid">
         <h5 class="source-heading">main.js</h5>
-        <pre><code id="example-js-source" class="language-js">import 'ol/ol.css';
-{{ js.source }}</code></pre>
+        <pre><code id="example-js-source" class="language-js">{{ js.source }}</code></pre>
       </div>
 
       <div class="row-fluid">
@@ -192,10 +192,12 @@
     &lt;meta charset="UTF-8"&gt;
     &lt;title&gt;{{ title }}&lt;/title&gt;
     &lt;!-- Pointer events polyfill for old browsers, see https://caniuse.com/#feat=pointer --&gt;
-    &lt;script src="https://unpkg.com/elm-pep"&gt;&lt;/script&gt;
-    &lt;!-- The line below is only needed for old environments like Internet Explorer and Android 4.x --&gt;
-    &lt;script src="https://cdn.polyfill.io/v3/polyfill.min.js?features=fetch,requestAnimationFrame,Element.prototype.classList,URL,TextDecoder,Number.isInteger"&gt;&lt;/script&gt;{{#if extraHead.remote}}
+    &lt;script src="https://unpkg.com/elm-pep@1.0.6/dist/elm-pep.js"&gt;&lt;/script&gt;
+    &lt;!-- The lines below are only needed for old environments like Internet Explorer and Android 4.x --&gt;
+    &lt;script src="https://cdn.polyfill.io/v3/polyfill.min.js?features=fetch,requestAnimationFrame,Element.prototype.classList,TextDecoder"&gt;&lt;/script&gt;
+    &lt;script src="https://cdnjs.cloudflare.com/ajax/libs/core-js/3.18.3/minified.js"&gt;&lt;/script&gt;{{#if extraHead.remote}}
 {{ indent extraHead.remote spaces=4 }}{{/if}}
+    &lt;link rel="stylesheet" href="node_modules/ol/ol.css"&gt;
     &lt;style&gt;
       .map {
         width: 100%;
@@ -204,18 +206,17 @@
 {{#if css.source}}{{ indent css.source spaces=6 }}{{/if}}    &lt;/style&gt;
   &lt;/head&gt;
   &lt;body&gt;
-{{ indent contents spaces=4 }}    &lt;script src="main.js"&gt;&lt;/script&gt;
+{{ indent contents spaces=4 }}    &lt;script type="module" src="main.js"&gt;&lt;/script&gt;
   &lt;/body&gt;
 &lt;/html&gt;</code></pre>
       </div>
 
-{{#if worker.source}}
-      <div class="row-fluid">
-        <h5 class="source-heading">worker.js</h5>
-        <pre><code id="example-worker-source" class="language-js">{{ worker.source }}</code></pre>
+{{#each extraSources}}
+      <div class="row-fluid extra-source">
+        <h5 class="source-heading">{{./name}}</h5>
+        <pre><code class="language-{{./type}}">{{ ./source }}</code></pre>
       </div>
-{{/if}}
-
+{{/each}}
       <div class="row-fluid">
         <h5 class="source-heading">package.json</h5>
         <pre><code id="example-pkg-source" class="language-json">{{ pkgJson }}</code></pre>

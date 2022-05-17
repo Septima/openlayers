@@ -5,7 +5,8 @@ import BaseObject from './Object.js';
 import Collection from './Collection.js';
 import CollectionEventType from './CollectionEventType.js';
 import EventType from './events/EventType.js';
-import LayerGroup from './layer/Group.js';
+import Layer from './layer/Layer.js';
+import LayerGroup, {GroupEvent} from './layer/Group.js';
 import MapBrowserEvent from './MapBrowserEvent.js';
 import MapBrowserEventHandler from './MapBrowserEventHandler.js';
 import MapBrowserEventType from './MapBrowserEventType.js';
@@ -33,6 +34,7 @@ import {
   isEmpty,
 } from './extent.js';
 import {fromUserCoordinate, toUserCoordinate} from './proj.js';
+import {getUid} from './util.js';
 import {hasArea} from './size.js';
 import {listen, unlistenByKey} from './events.js';
 import {removeNode} from './dom.js';
@@ -48,6 +50,7 @@ import {removeNode} from './dom.js';
  * @property {import("./transform.js").Transform} coordinateToPixelTransform CoordinateToPixelTransform.
  * @property {import("rbush").default} declutterTree DeclutterTree.
  * @property {null|import("./extent.js").Extent} extent Extent.
+ * @property {import("./extent.js").Extent} [nextExtent] Next extent during an animation series.
  * @property {number} index Index.
  * @property {Array<import("./layer/Layer.js").State>} layerStatesArray LayerStatesArray.
  * @property {number} layerIndex LayerIndex.
@@ -58,6 +61,8 @@ import {removeNode} from './dom.js';
  * @property {!Object<string, Object<string, boolean>>} usedTiles UsedTiles.
  * @property {Array<number>} viewHints ViewHints.
  * @property {!Object<string, Object<string, boolean>>} wantedTiles WantedTiles.
+ * @property {string} mapId The id of the map.
+ * @property {Object<string, boolean>} renderTargets Identifiers of previously rendered elements.
  */
 
 /**
@@ -68,7 +73,7 @@ import {removeNode} from './dom.js';
  * @typedef {Object} AtPixelOptions
  * @property {undefined|function(import("./layer/Layer.js").default<import("./source/Source").default>): boolean} [layerFilter] Layer filter
  * function. The filter function will receive one argument, the
- * {@link module:ol/layer/Layer layer-candidate} and it should return a boolean value.
+ * {@link module:ol/layer/Layer~Layer layer-candidate} and it should return a boolean value.
  * Only layers which are visible and for which this function returns `true`
  * will be tested for features. By default, all visible layers will be tested.
  * @property {number} [hitTolerance=0] Hit-detection tolerance in css pixels. Pixels
@@ -137,10 +142,40 @@ import {removeNode} from './dom.js';
  * element itself or the `id` of the element. If not specified at construction
  * time, {@link module:ol/Map~Map#setTarget} must be called for the map to be
  * rendered. If passed by element, the container can be in a secondary document.
- * @property {View} [view] The map's view.  No layer sources will be
+ * @property {View|Promise<import("./View.js").ViewOptions>} [view] The map's view.  No layer sources will be
  * fetched unless this is specified at construction time or through
  * {@link module:ol/Map~Map#setView}.
  */
+
+/**
+ * @param {import("./layer/Base.js").default} layer Layer.
+ */
+function removeLayerMapProperty(layer) {
+  if (layer instanceof Layer) {
+    layer.setMapInternal(null);
+    return;
+  }
+  if (layer instanceof LayerGroup) {
+    layer.getLayers().forEach(removeLayerMapProperty);
+  }
+}
+
+/**
+ * @param {import("./layer/Base.js").default} layer Layer.
+ * @param {PluggableMap} map Map.
+ */
+function setLayerMapProperty(layer, map) {
+  if (layer instanceof Layer) {
+    layer.setMapInternal(map);
+    return;
+  }
+  if (layer instanceof LayerGroup) {
+    const layers = layer.getLayers().getArray();
+    for (let i = 0, ii = layers.length; i < ii; ++i) {
+      setLayerMapProperty(layers[i], map);
+    }
+  }
+}
 
 /**
  * @fires import("./MapBrowserEvent.js").MapBrowserEvent
@@ -173,6 +208,18 @@ class PluggableMap extends BaseObject {
     this.un;
 
     const optionsInternal = createOptionsInternal(options);
+
+    /**
+     * @private
+     * @type {boolean|undefined}
+     */
+    this.renderComplete_;
+
+    /**
+     * @private
+     * @type {boolean}
+     */
+    this.loaded_ = true;
 
     /** @private */
     this.boundHandleBrowserEvent_ = this.handleBrowserEvent.bind(this);
@@ -322,7 +369,7 @@ class PluggableMap extends BaseObject {
      * @private
      * @type {?Array<import("./events.js").EventsKey>}
      */
-    this.keyHandlerKeys_ = null;
+    this.targetChangeHandlerKeys_ = null;
 
     /**
      * @type {Collection<import("./control/Control.js").default>}
@@ -350,16 +397,10 @@ class PluggableMap extends BaseObject {
     this.overlayIdIndex_ = {};
 
     /**
-     * @type {import("./renderer/Map.js").default}
+     * @type {import("./renderer/Map.js").default|null}
      * @private
      */
     this.renderer_ = null;
-
-    /**
-     * @type {undefined|function(Event): void}
-     * @private
-     */
-    this.handleResize_;
 
     /**
      * @private
@@ -387,6 +428,13 @@ class PluggableMap extends BaseObject {
     // setProperties will trigger the rendering of the map if the map
     // is "defined" already.
     this.setProperties(optionsInternal.values);
+
+    const map = this;
+    if (options.view && !(options.view instanceof View)) {
+      options.view.then(function (viewOptions) {
+        map.setView(new View(viewOptions));
+      });
+    }
 
     this.controls.addEventListener(
       CollectionEventType.ADD,
@@ -499,7 +547,7 @@ class PluggableMap extends BaseObject {
 
   /**
    * Add the given interaction to the map. If you want to add an interaction
-   * at another point of the collection use `getInteraction()` and the methods
+   * at another point of the collection use `getInteractions()` and the methods
    * available on {@link module:ol/Collection~Collection}. This can be used to
    * stop the event propagation from the handleEvent function. The interactions
    * get to handle the events in the reverse order of this collection.
@@ -520,6 +568,14 @@ class PluggableMap extends BaseObject {
   addLayer(layer) {
     const layers = this.getLayerGroup().getLayers();
     layers.push(layer);
+  }
+
+  /**
+   * @param {import("./layer/Group.js").GroupEvent} event The layer add event.
+   * @private
+   */
+  handleLayerAdd_(event) {
+    setLayerMapProperty(event.layer, this);
   }
 
   /**
@@ -560,9 +616,9 @@ class PluggableMap extends BaseObject {
    * @param {import("./pixel.js").Pixel} pixel Pixel.
    * @param {function(import("./Feature.js").FeatureLike, import("./layer/Layer.js").default<import("./source/Source").default>, import("./geom/SimpleGeometry.js").default): T} callback Feature callback. The callback will be
    *     called with two arguments. The first argument is one
-   *     {@link module:ol/Feature feature} or
-   *     {@link module:ol/render/Feature render feature} at the pixel, the second is
-   *     the {@link module:ol/layer/Layer layer} of the feature and will be null for
+   *     {@link module:ol/Feature~Feature feature} or
+   *     {@link module:ol/render/Feature~RenderFeature render feature} at the pixel, the second is
+   *     the {@link module:ol/layer/Layer~Layer layer} of the feature and will be null for
    *     unmanaged layers. To stop detection, callback functions can return a
    *     truthy value.
    * @param {AtPixelOptions} [opt_options] Optional options.
@@ -572,7 +628,7 @@ class PluggableMap extends BaseObject {
    * @api
    */
   forEachFeatureAtPixel(pixel, callback, opt_options) {
-    if (!this.frameState_) {
+    if (!this.frameState_ || !this.renderer_) {
       return;
     }
     const coordinate = this.getCoordinateFromPixelInternal(pixel);
@@ -615,17 +671,43 @@ class PluggableMap extends BaseObject {
   }
 
   /**
+   * Get all layers from all layer groups.
+   * @return {Array<import("./layer/Layer.js").default>} Layers.
+   * @api
+   */
+  getAllLayers() {
+    const layers = [];
+    function addLayersFrom(layerGroup) {
+      layerGroup.forEach(function (layer) {
+        if (layer instanceof LayerGroup) {
+          addLayersFrom(layer.getLayers());
+        } else {
+          layers.push(layer);
+        }
+      });
+    }
+    addLayersFrom(this.getLayers());
+    return layers;
+  }
+
+  /**
+   * Please the `layer.getData()` method for {@link module:ol/layer/Tile~TileLayer#getData tile layers} or
+   * {@link module:ol/layer/Image~ImageLayer#getData image layers} instead of using this method.
+   *
    * Detect layers that have a color value at a pixel on the viewport, and
    * execute a callback with each matching layer. Layers included in the
    * detection can be configured through `opt_layerFilter`.
    *
-   * Note: this may give false positives unless the map layers have had different `className`
-   * properties assigned to them.
+   * Note: In maps with more than one layer, this method will typically return pixel data
+   * representing the composed image of all layers visible at the given pixel – because layers
+   * will generally share the same rendering context.  To force layers to render separately, and
+   * to get pixel data representing only one layer at a time, you can assign each layer a unique
+   * `className` in its constructor.
    *
    * @param {import("./pixel.js").Pixel} pixel Pixel.
    * @param {function(this: S, import("./layer/Layer.js").default, (Uint8ClampedArray|Uint8Array)): T} callback
    *     Layer callback. This callback will receive two arguments: first is the
-   *     {@link module:ol/layer/Layer layer}, second argument is an array representing
+   *     {@link module:ol/layer/Layer~Layer layer}, second argument is an array representing
    *     [R, G, B, A] pixel values (0 - 255) and will be `null` for layer types
    *     that do not currently support this argument. To stop detection, callback
    *     functions can return a truthy value.
@@ -634,9 +716,10 @@ class PluggableMap extends BaseObject {
    * callback execution, or the first truthy callback return value.
    * @template S,T
    * @api
+   * @deprecated
    */
   forEachLayerAtPixel(pixel, callback, opt_options) {
-    if (!this.frameState_) {
+    if (!this.frameState_ || !this.renderer_) {
       return;
     }
     const options = opt_options || {};
@@ -661,7 +744,7 @@ class PluggableMap extends BaseObject {
    * @api
    */
   hasFeatureAtPixel(pixel, opt_options) {
-    if (!this.frameState_) {
+    if (!this.frameState_ || !this.renderer_) {
       return false;
     }
     const coordinate = this.getCoordinateFromPixelInternal(pixel);
@@ -841,6 +924,23 @@ class PluggableMap extends BaseObject {
   }
 
   /**
+   * Clear any existing layers and add layers to the map.
+   * @param {Array<import("./layer/Base.js").default>|Collection<import("./layer/Base.js").default>} layers The layers to be added to the map.
+   * @api
+   */
+  setLayers(layers) {
+    const group = this.getLayerGroup();
+    if (layers instanceof Collection) {
+      group.setLayers(layers);
+      return;
+    }
+
+    const collection = group.getLayers();
+    collection.clear();
+    collection.extend(layers);
+  }
+
+  /**
    * Get the collection of layers associated with this map.
    * @return {!Collection<import("./layer/Base.js").default>} Layers.
    * @api
@@ -853,12 +953,19 @@ class PluggableMap extends BaseObject {
   /**
    * @return {boolean} Layers have sources that are still loading.
    */
-  getLoading() {
+  getLoadingOrNotReady() {
     const layerStatesArray = this.getLayerGroup().getLayerStatesArray();
     for (let i = 0, ii = layerStatesArray.length; i < ii; ++i) {
-      const layer = layerStatesArray[i].layer;
+      const state = layerStatesArray[i];
+      if (!state.visible) {
+        continue;
+      }
+      const renderer = state.layer.getRenderer();
+      if (renderer && !renderer.ready) {
+        return true;
+      }
       const source = /** @type {import("./layer/Layer.js").default} */ (
-        layer
+        state.layer
       ).getSource();
       if (source && source.loading) {
         return true;
@@ -902,7 +1009,7 @@ class PluggableMap extends BaseObject {
 
   /**
    * Get the map renderer.
-   * @return {import("./renderer/Map.js").default} Renderer
+   * @return {import("./renderer/Map.js").default|null} Renderer
    */
   getRenderer() {
     return this.renderer_;
@@ -1086,17 +1193,26 @@ class PluggableMap extends BaseObject {
       }
     }
 
-    if (
-      frameState &&
-      this.hasListener(RenderEventType.RENDERCOMPLETE) &&
-      !frameState.animate &&
-      !this.tileQueue_.getTilesLoading() &&
-      !this.getLoading()
-    ) {
-      this.renderer_.dispatchRenderEvent(
-        RenderEventType.RENDERCOMPLETE,
-        frameState
-      );
+    if (frameState && this.renderer_ && !frameState.animate) {
+      if (this.renderComplete_ === true) {
+        if (this.hasListener(RenderEventType.RENDERCOMPLETE)) {
+          this.renderer_.dispatchRenderEvent(
+            RenderEventType.RENDERCOMPLETE,
+            frameState
+          );
+        }
+        if (this.loaded_ === false) {
+          this.loaded_ = true;
+          this.dispatchEvent(
+            new MapEvent(MapEventType.LOADEND, this, frameState)
+          );
+        }
+      } else if (this.loaded_ === true) {
+        this.loaded_ = false;
+        this.dispatchEvent(
+          new MapEvent(MapEventType.LOADSTART, this, frameState)
+        );
+      }
     }
 
     const postRenderFunctions = this.postRenderFunctions_;
@@ -1121,21 +1237,11 @@ class PluggableMap extends BaseObject {
    * @private
    */
   handleTargetChanged_() {
-    // target may be undefined, null, a string or an Element.
-    // If it's a string we convert it to an Element before proceeding.
-    // If it's not now an Element we remove the viewport from the DOM.
-    // If it's an Element we append the viewport element to it.
-
-    let targetElement;
-    if (this.getTarget()) {
-      targetElement = this.getTargetElement();
-    }
-
     if (this.mapBrowserEventHandler_) {
-      for (let i = 0, ii = this.keyHandlerKeys_.length; i < ii; ++i) {
-        unlistenByKey(this.keyHandlerKeys_[i]);
+      for (let i = 0, ii = this.targetChangeHandlerKeys_.length; i < ii; ++i) {
+        unlistenByKey(this.targetChangeHandlerKeys_[i]);
       }
-      this.keyHandlerKeys_ = null;
+      this.targetChangeHandlerKeys_ = null;
       this.viewport_.removeEventListener(
         EventType.CONTEXTMENU,
         this.boundHandleBrowserEvent_
@@ -1144,15 +1250,17 @@ class PluggableMap extends BaseObject {
         EventType.WHEEL,
         this.boundHandleBrowserEvent_
       );
-      if (this.handleResize_ !== undefined) {
-        removeEventListener(EventType.RESIZE, this.handleResize_, false);
-        this.handleResize_ = undefined;
-      }
       this.mapBrowserEventHandler_.dispose();
       this.mapBrowserEventHandler_ = null;
       removeNode(this.viewport_);
     }
 
+    // target may be undefined, null, a string or an Element.
+    // If it's a string we convert it to an Element before proceeding.
+    // If it's not now an Element we remove the viewport from the DOM.
+    // If it's an Element we append the viewport element to it.
+
+    const targetElement = this.getTargetElement();
     if (!targetElement) {
       if (this.renderer_) {
         clearTimeout(this.postRenderTimeoutHandle_);
@@ -1192,10 +1300,11 @@ class PluggableMap extends BaseObject {
         PASSIVE_EVENT_LISTENERS ? {passive: false} : false
       );
 
+      const defaultView = this.getOwnerDocument().defaultView;
       const keyboardEventTarget = !this.keyboardEventTarget_
         ? targetElement
         : this.keyboardEventTarget_;
-      this.keyHandlerKeys_ = [
+      this.targetChangeHandlerKeys_ = [
         listen(
           keyboardEventTarget,
           EventType.KEYDOWN,
@@ -1208,12 +1317,8 @@ class PluggableMap extends BaseObject {
           this.handleBrowserEvent,
           this
         ),
+        listen(defaultView, EventType.RESIZE, this.updateSize, this),
       ];
-
-      if (!this.handleResize_) {
-        this.handleResize_ = this.updateSize.bind(this);
-        window.addEventListener(EventType.RESIZE, this.handleResize_, false);
-      }
     }
 
     this.updateSize();
@@ -1279,9 +1384,12 @@ class PluggableMap extends BaseObject {
     }
     const layerGroup = this.getLayerGroup();
     if (layerGroup) {
+      this.handleLayerAdd_(new GroupEvent('addlayer', layerGroup));
       this.layerGroupPropertyListenerKeys_ = [
         listen(layerGroup, ObjectEventType.PROPERTYCHANGE, this.render, this),
         listen(layerGroup, EventType.CHANGE, this.render, this),
+        listen(layerGroup, 'addlayer', this.handleLayerAdd_, this),
+        listen(layerGroup, 'removelayer', this.handleLayerRemove_, this),
       ];
     }
     this.render();
@@ -1363,6 +1471,14 @@ class PluggableMap extends BaseObject {
   }
 
   /**
+   * @param {import("./layer/Group.js").GroupEvent} event The layer remove event.
+   * @private
+   */
+  handleLayerRemove_(event) {
+    removeLayerMapProperty(event.layer);
+  }
+
+  /**
    * Remove the given overlay from the map.
    * @param {import("./Overlay.js").default} overlay Overlay.
    * @return {import("./Overlay.js").default|undefined} The removed overlay (or undefined
@@ -1411,11 +1527,27 @@ class PluggableMap extends BaseObject {
         viewState: viewState,
         viewHints: viewHints,
         wantedTiles: {},
+        mapId: getUid(this),
+        renderTargets: {},
       };
+      if (viewState.nextCenter && viewState.nextResolution) {
+        const rotation = isNaN(viewState.nextRotation)
+          ? viewState.rotation
+          : viewState.nextRotation;
+
+        frameState.nextExtent = getForViewAndSize(
+          viewState.nextCenter,
+          viewState.nextResolution,
+          rotation,
+          size
+        );
+      }
     }
 
     this.frameState_ = frameState;
-    this.renderer_.renderFrame(frameState);
+    /** @type {import("./renderer/Map.js").default} */ (
+      this.renderer_
+    ).renderFrame(frameState);
 
     if (frameState) {
       if (frameState.animate) {
@@ -1455,6 +1587,15 @@ class PluggableMap extends BaseObject {
 
     this.dispatchEvent(new MapEvent(MapEventType.POSTRENDER, this, frameState));
 
+    this.renderComplete_ =
+      this.hasListener(MapEventType.LOADSTART) ||
+      this.hasListener(MapEventType.LOADEND) ||
+      this.hasListener(RenderEventType.RENDERCOMPLETE)
+        ? !this.tileQueue_.getTilesLoading() &&
+          !this.tileQueue_.getCount() &&
+          !this.getLoadingOrNotReady()
+        : undefined;
+
     if (!this.postRenderTimeoutHandle_) {
       this.postRenderTimeoutHandle_ = setTimeout(() => {
         this.postRenderTimeoutHandle_ = undefined;
@@ -1470,6 +1611,10 @@ class PluggableMap extends BaseObject {
    * @api
    */
   setLayerGroup(layerGroup) {
+    const oldLayerGroup = this.getLayerGroup();
+    if (oldLayerGroup) {
+      this.handleLayerRemove_(new GroupEvent('removelayer', oldLayerGroup));
+    }
     this.set(MapProperty.LAYERGROUP, layerGroup);
   }
 
@@ -1496,12 +1641,24 @@ class PluggableMap extends BaseObject {
 
   /**
    * Set the view for this map.
-   * @param {View} view The view that controls this map.
+   * @param {View|Promise<import("./View.js").ViewOptions>} view The view that controls this map.
+   * It is also possible to pass a promise that resolves to options for constructing a view.  This
+   * alternative allows view properties to be resolved by sources or other components that load
+   * view-related metadata.
    * @observable
    * @api
    */
   setView(view) {
-    this.set(MapProperty.VIEW, view);
+    if (!view || view instanceof View) {
+      this.set(MapProperty.VIEW, view);
+      return;
+    }
+    this.set(MapProperty.VIEW, new View());
+
+    const map = this;
+    view.then(function (viewOptions) {
+      map.setView(new View(viewOptions));
+    });
   }
 
   /**
@@ -1600,7 +1757,7 @@ function createOptionsInternal(options) {
   values[MapProperty.TARGET] = options.target;
 
   values[MapProperty.VIEW] =
-    options.view !== undefined ? options.view : new View();
+    options.view instanceof View ? options.view : new View();
 
   let controls;
   if (options.controls !== undefined) {

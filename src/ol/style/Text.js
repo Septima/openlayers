@@ -27,10 +27,18 @@ const DEFAULT_FILL_COLOR = '#333';
  * @property {number|import("../size.js").Size} [scale] Scale.
  * @property {boolean} [rotateWithView=false] Whether to rotate the text with the view.
  * @property {number} [rotation=0] Rotation in radians (positive rotation clockwise).
- * @property {string} [text] Text content.
+ * @property {string|Array<string>} [text] Text content or rich text content. For plain text provide a string, which can
+ * contain line breaks (`\n`). For rich text provide an array of text/font tuples. A tuple consists of the text to
+ * render and the font to use (or `''` to use the text style's font). A line break has to be a separate tuple (i.e. `'\n', ''`).
+ * **Example:** `['foo', 'bold 10px sans-serif', ' bar', 'italic 10px sans-serif', ' baz', '']` will yield "**foo** *bar* baz".
+ * **Note:** Rich text is not supported for the immediate rendering API.
  * @property {string} [textAlign] Text alignment. Possible values: 'left', 'right', 'center', 'end' or 'start'.
  * Default is 'center' for `placement: 'point'`. For `placement: 'line'`, the default is to let the renderer choose a
  * placement where `maxAngle` is not exceeded.
+ * @property {string} [justify] Text justification within the text box.
+ * If not set, text is justified towards the `textAlign` anchor.
+ * Otherwise, use options `'left'`, `'center'`, or `'right'` to justify the text within the text box.
+ * **Note:** `justify` is ignored for immediate rendering and also for `placement: 'line'`.
  * @property {string} [textBaseline='middle'] Text base line. Possible values: 'bottom', 'top', 'middle', 'alphabetic',
  * 'hanging', 'ideographic'.
  * @property {import("./Fill.js").default} [fill] Fill style. If none is provided, we'll use a dark fill-style (#333).
@@ -87,7 +95,7 @@ class Text {
 
     /**
      * @private
-     * @type {string|undefined}
+     * @type {string|Array<string>|undefined}
      */
     this.text_ = options.text;
 
@@ -96,6 +104,12 @@ class Text {
      * @type {string|undefined}
      */
     this.textAlign_ = options.textAlign;
+
+    /**
+     * @private
+     * @type {string|undefined}
+     */
+    this.justify_ = options.justify;
 
     /**
      * @private
@@ -168,7 +182,7 @@ class Text {
 
     /**
      * @private
-     * @type {Array<number>}
+     * @type {Array<number>|null}
      */
     this.padding_ = options.padding === undefined ? null : options.padding;
   }
@@ -190,6 +204,7 @@ class Text {
       scale: Array.isArray(scale) ? scale.slice() : scale,
       text: this.getText(),
       textAlign: this.getTextAlign(),
+      justify: this.getJustify(),
       textBaseline: this.getTextBaseline(),
       fill: this.getFill() ? this.getFill().clone() : undefined,
       stroke: this.getStroke() ? this.getStroke().clone() : undefined,
@@ -201,7 +216,7 @@ class Text {
       backgroundStroke: this.getBackgroundStroke()
         ? this.getBackgroundStroke().clone()
         : undefined,
-      padding: this.getPadding(),
+      padding: this.getPadding() || undefined,
     });
   }
 
@@ -314,7 +329,7 @@ class Text {
 
   /**
    * Get the text to be rendered.
-   * @return {string|undefined} Text.
+   * @return {string|Array<string>|undefined} Text.
    * @api
    */
   getText() {
@@ -328,6 +343,15 @@ class Text {
    */
   getTextAlign() {
     return this.textAlign_;
+  }
+
+  /**
+   * Get the justification.
+   * @return {string|undefined} Justification.
+   * @api
+   */
+  getJustify() {
+    return this.justify_;
   }
 
   /**
@@ -359,7 +383,7 @@ class Text {
 
   /**
    * Get the padding for the text.
-   * @return {Array<number>} Padding.
+   * @return {Array<number>|null} Padding.
    * @api
    */
   getPadding() {
@@ -480,7 +504,7 @@ class Text {
   /**
    * Set the text.
    *
-   * @param {string|undefined} text Text.
+   * @param {string|Array<string>|undefined} text Text.
    * @api
    */
   setText(text) {
@@ -495,6 +519,16 @@ class Text {
    */
   setTextAlign(textAlign) {
     this.textAlign_ = textAlign;
+  }
+
+  /**
+   * Set the justification.
+   *
+   * @param {string|undefined} justify Justification.
+   * @api
+   */
+  setJustify(justify) {
+    this.justify_ = justify;
   }
 
   /**
@@ -530,7 +564,7 @@ class Text {
   /**
    * Set the padding (`[top, right, bottom, left]`).
    *
-   * @param {!Array<number>} padding Padding.
+   * @param {Array<number>|null} padding Padding.
    * @api
    */
   setPadding(padding) {

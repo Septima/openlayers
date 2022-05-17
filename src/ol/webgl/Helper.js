@@ -10,9 +10,7 @@ import {
   UNSIGNED_INT,
   UNSIGNED_SHORT,
   getContext,
-  getSupportedExtensions,
 } from '../webgl.js';
-import {assert} from '../asserts.js';
 import {clear} from '../obj.js';
 import {
   compose as composeTransform,
@@ -23,7 +21,6 @@ import {
 } from '../transform.js';
 import {create, fromTransform} from '../vec/mat4.js';
 import {getUid} from '../util.js';
-import {includes} from '../array.js';
 
 /**
  * @typedef {Object} BufferCacheEntry
@@ -100,6 +97,7 @@ export const AttributeType = {
  * @property {Object<string,UniformValue>} [uniforms] Uniform definitions; property names must match the uniform
  * names in the provided or default shaders.
  * @property {Array<PostProcessesOptions>} [postProcesses] Post-processes definitions
+ * @property {string} [canvasCacheKey] The cache key for the canvas.
  */
 
 /**
@@ -109,6 +107,78 @@ export const AttributeType = {
  * @property {WebGLTexture} [texture] Texture
  * @private
  */
+
+/**
+ * @typedef {Object} CanvasCacheItem
+ * @property {HTMLCanvasElement} canvas Canvas element.
+ * @property {number} users The count of users of this canvas.
+ */
+
+/**
+ * @type {Object<string,CanvasCacheItem>}
+ */
+const canvasCache = {};
+
+/**
+ * @param {string} key The cache key for the canvas.
+ * @return {string} The shared cache key.
+ */
+function getSharedCanvasCacheKey(key) {
+  return 'shared/' + key;
+}
+
+let uniqueCanvasCacheKeyCount = 0;
+
+/**
+ * @return {string} The unique cache key.
+ */
+function getUniqueCanvasCacheKey() {
+  const key = 'unique/' + uniqueCanvasCacheKeyCount;
+  uniqueCanvasCacheKeyCount += 1;
+  return key;
+}
+
+/**
+ * @param {string} key The cache key for the canvas.
+ * @return {HTMLCanvasElement} The canvas.
+ */
+function getCanvas(key) {
+  let cacheItem = canvasCache[key];
+  if (!cacheItem) {
+    const canvas = document.createElement('canvas');
+    canvas.style.position = 'absolute';
+    canvas.style.left = '0';
+    cacheItem = {users: 0, canvas};
+    canvasCache[key] = cacheItem;
+  }
+
+  cacheItem.users += 1;
+  return cacheItem.canvas;
+}
+
+/**
+ * @param {string} key The cache key for the canvas.
+ */
+function releaseCanvas(key) {
+  const cacheItem = canvasCache[key];
+  if (!cacheItem) {
+    return;
+  }
+
+  cacheItem.users -= 1;
+  if (cacheItem.users > 0) {
+    return;
+  }
+
+  const canvas = cacheItem.canvas;
+  const gl = getContext(canvas);
+  const extension = gl.getExtension('WEBGL_lose_context');
+  if (extension) {
+    extension.loseContext();
+  }
+
+  delete canvasCache[key];
+}
 
 /**
  * @classdesc
@@ -194,8 +264,8 @@ export const AttributeType = {
  * ### Specifying attributes
  *
  *   The GPU only receives the data as arrays of numbers. These numbers must be handled differently depending on what it describes (position, texture coordinate...).
- *   Attributes are used to specify these uses. Use {@link enableAttributeArray_} and either
- *   the default attribute names in {@link module:ol/webgl/Helper.DefaultAttrib} or custom ones.
+ *   Attributes are used to specify these uses. Specify the attribute names with
+ *   {@link module:ol/webgl/Helper~WebGLHelper#enableAttributes enableAttributes()} (see code snippet below).
  *
  *   Please note that you will have to specify the type and offset of the attributes in the data array. You can refer to the documentation of [WebGLRenderingContext.vertexAttribPointer](https://developer.mozilla.org/en-US/docs/Web/API/WebGLRenderingContext/vertexAttribPointer) for more explanation.
  *   ```js
@@ -233,7 +303,6 @@ export const AttributeType = {
  *
  * For an example usage of this class, refer to {@link module:ol/renderer/webgl/PointsLayer~WebGLPointsLayerRenderer}.
  *
- *
  * @api
  */
 class WebGLHelper extends Disposable {
@@ -253,18 +322,23 @@ class WebGLHelper extends Disposable {
 
     /**
      * @private
+     * @type {string}
+     */
+    this.canvasCacheKey_ = options.canvasCacheKey
+      ? getSharedCanvasCacheKey(options.canvasCacheKey)
+      : getUniqueCanvasCacheKey();
+
+    /**
+     * @private
      * @type {HTMLCanvasElement}
      */
-    this.canvas_ = document.createElement('canvas');
-    this.canvas_.style.position = 'absolute';
-    this.canvas_.style.left = '0';
+    this.canvas_ = getCanvas(this.canvasCacheKey_);
 
     /**
      * @private
      * @type {WebGLRenderingContext}
      */
     this.gl_ = getContext(this.canvas_);
-    const gl = this.getGL();
 
     /**
      * @private
@@ -274,17 +348,15 @@ class WebGLHelper extends Disposable {
 
     /**
      * @private
+     * @type {Object<string, Object>}
+     */
+    this.extensionCache_ = {};
+
+    /**
+     * @private
      * @type {WebGLProgram}
      */
     this.currentProgram_ = null;
-
-    assert(includes(getSupportedExtensions(), 'OES_element_index_uint'), 63);
-    assert(includes(getSupportedExtensions(), 'OES_texture_float'), 63);
-    assert(includes(getSupportedExtensions(), 'OES_texture_float_linear'), 63);
-
-    gl.getExtension('OES_element_index_uint');
-    gl.getExtension('OES_texture_float');
-    gl.getExtension('OES_texture_float_linear');
 
     this.canvas_.addEventListener(
       ContextEventType.LOST,
@@ -333,13 +405,10 @@ class WebGLHelper extends Disposable {
      */
     this.uniforms_ = [];
     if (options.uniforms) {
-      for (const name in options.uniforms) {
-        this.uniforms_.push({
-          name: name,
-          value: options.uniforms[name],
-        });
-      }
+      this.setUniforms(options.uniforms);
     }
+
+    const gl = this.getGL();
 
     /**
      * An array of PostProcessingPass objects is kept in this variable, built from the steps provided in the
@@ -371,6 +440,43 @@ class WebGLHelper extends Disposable {
      * @private
      */
     this.startTime_ = Date.now();
+  }
+
+  /**
+   * @param {Object<string, UniformValue>} uniforms Uniform definitions.
+   */
+  setUniforms(uniforms) {
+    this.uniforms_ = [];
+    for (const name in uniforms) {
+      this.uniforms_.push({
+        name: name,
+        value: uniforms[name],
+      });
+    }
+    this.uniformLocations_ = {};
+  }
+
+  /**
+   * @param {string} canvasCacheKey The canvas cache key.
+   * @return {boolean} The provided key matches the one this helper was constructed with.
+   */
+  canvasCacheKeyMatches(canvasCacheKey) {
+    return this.canvasCacheKey_ === getSharedCanvasCacheKey(canvasCacheKey);
+  }
+
+  /**
+   * Get a WebGL extension.  If the extension is not supported, null is returned.
+   * Extensions are cached after they are enabled for the first time.
+   * @param {string} name The extension name.
+   * @return {Object|null} The extension or null if not supported.
+   */
+  getExtension(name) {
+    if (name in this.extensionCache_) {
+      return this.extensionCache_[name];
+    }
+    const extension = this.gl_.getExtension(name);
+    this.extensionCache_[name] = extension;
+    return extension;
   }
 
   /**
@@ -432,6 +538,11 @@ class WebGLHelper extends Disposable {
       ContextEventType.RESTORED,
       this.boundHandleWebGLContextRestored_
     );
+
+    releaseCanvas(this.canvasCacheKey_);
+
+    delete this.gl_;
+    delete this.canvas_;
   }
 
   /**
@@ -464,6 +575,7 @@ class WebGLHelper extends Disposable {
 
     gl.clearColor(0.0, 0.0, 0.0, 0.0);
     gl.clear(gl.COLOR_BUFFER_BIT);
+
     gl.enable(gl.BLEND);
     gl.blendFunc(
       gl.ONE,
@@ -511,6 +623,8 @@ class WebGLHelper extends Disposable {
    */
   drawElements(start, end) {
     const gl = this.getGL();
+    this.getExtension('OES_element_index_uint');
+
     const elementType = gl.UNSIGNED_INT;
     const elementSize = 4;
 
@@ -522,15 +636,25 @@ class WebGLHelper extends Disposable {
   /**
    * Apply the successive post process passes which will eventually render to the actual canvas.
    * @param {import("../PluggableMap.js").FrameState} frameState current frame state
-   * @api
+   * @param {function(WebGLRenderingContext, import("../PluggableMap.js").FrameState):void} [preCompose] Called before composing.
+   * @param {function(WebGLRenderingContext, import("../PluggableMap.js").FrameState):void} [postCompose] Called before composing.
    */
-  finalizeDraw(frameState) {
+  finalizeDraw(frameState, preCompose, postCompose) {
     // apply post processes using the next one as target
-    for (let i = 0; i < this.postProcessPasses_.length; i++) {
-      this.postProcessPasses_[i].apply(
-        frameState,
-        this.postProcessPasses_[i + 1] || null
-      );
+    for (let i = 0, ii = this.postProcessPasses_.length; i < ii; i++) {
+      if (i === ii - 1) {
+        this.postProcessPasses_[i].apply(
+          frameState,
+          null,
+          preCompose,
+          postCompose
+        );
+      } else {
+        this.postProcessPasses_[i].apply(
+          frameState,
+          this.postProcessPasses_[i + 1]
+        );
+      }
     }
   }
 
@@ -554,7 +678,6 @@ class WebGLHelper extends Disposable {
   /**
    * Sets the default matrix uniforms for a given frame state. This is called internally in `prepareDraw`.
    * @param {import("../PluggableMap.js").FrameState} frameState Frame state.
-   * @private
    */
   applyFrameState(frameState) {
     const size = frameState.size;
@@ -591,7 +714,6 @@ class WebGLHelper extends Disposable {
   /**
    * Sets the custom uniforms based on what was given in the constructor. This is called internally in `prepareDraw`.
    * @param {import("../PluggableMap.js").FrameState} frameState Frame state.
-   * @private
    */
   applyUniforms(frameState) {
     const gl = this.getGL();
@@ -835,6 +957,15 @@ class WebGLHelper extends Disposable {
    */
   setUniformFloatValue(uniform, value) {
     this.getGL().uniform1f(this.getUniformLocation(uniform), value);
+  }
+
+  /**
+   * Give a value for a vec4 uniform
+   * @param {string} uniform Uniform name
+   * @param {Array<number>} value Array of length 4.
+   */
+  setUniformFloatVec4(uniform, value) {
+    this.getGL().uniform4fv(this.getUniformLocation(uniform), value);
   }
 
   /**

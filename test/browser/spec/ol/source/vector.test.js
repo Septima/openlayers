@@ -50,6 +50,34 @@ describe('ol.source.Vector', function () {
       it('returns true', function () {
         expect(vectorSource.isEmpty()).to.be(true);
       });
+      it('returns true without spatial index', function () {
+        const source = new VectorSource({
+          useSpatialIndex: false,
+        });
+        expect(source.isEmpty()).to.be(true);
+      });
+      it('returns false with geometry', function () {
+        vectorSource.addFeature(new Feature(new Point([0, 0])));
+        expect(vectorSource.isEmpty()).to.be(false);
+      });
+      it('returns false without spatial index and geometry', function () {
+        const source = new VectorSource({
+          useSpatialIndex: false,
+        });
+        source.addFeature(new Feature(new Point([0, 0])));
+        expect(source.isEmpty()).to.be(false);
+      });
+      it('returns false with null geometry', function () {
+        vectorSource.addFeature(new Feature());
+        expect(vectorSource.isEmpty()).to.be(false);
+      });
+      it('returns false without spatial index and null geometry', function () {
+        const source = new VectorSource({
+          useSpatialIndex: false,
+        });
+        source.addFeature(new Feature());
+        expect(source.isEmpty()).to.be(false);
+      });
     });
 
     describe('#addFeature', function () {
@@ -338,6 +366,19 @@ describe('ol.source.Vector', function () {
         listen(vectorSource, 'removefeature', listener);
         vectorSource.removeFeature(features[0]);
         expect(listener.called).to.be(true);
+      });
+
+      it('accepts features that are not in the source', function () {
+        const changeListener = sinon.spy();
+        listen(vectorSource, 'change', changeListener);
+
+        const removeFeatureListener = sinon.spy();
+        listen(vectorSource, 'removefeature', removeFeatureListener);
+
+        const feature = new Feature(new Point([0, 0]));
+        vectorSource.removeFeature(feature);
+        expect(changeListener.called).to.be(false);
+        expect(removeFeatureListener.called).to.be(false);
       });
     });
 

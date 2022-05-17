@@ -4,7 +4,7 @@
 
 /**
  * The ol/proj module stores:
- * * a list of {@link module:ol/proj/Projection}
+ * * a list of {@link module:ol/proj/Projection~Projection}
  * objects, one for each projection supported by the application
  * * a list of transform functions needed to convert coordinates in one projection
  * into another.
@@ -43,13 +43,13 @@
  *
  * In addition to Proj4js support, any transform functions can be added with
  * {@link module:ol/proj.addCoordinateTransforms}. To use this, you must first create
- * a {@link module:ol/proj/Projection} object for the new projection and add it with
+ * a {@link module:ol/proj/Projection~Projection} object for the new projection and add it with
  * {@link module:ol/proj.addProjection}. You can then add the forward and inverse
  * functions with {@link module:ol/proj.addCoordinateTransforms}. See
  * examples/wms-custom-proj for an example of this.
  *
  * Note that if no transforms are needed and you only need to define the
- * projection, just add a {@link module:ol/proj/Projection} with
+ * projection, just add a {@link module:ol/proj/Projection~Projection} with
  * {@link module:ol/proj.addProjection}. See examples/wms-no-proj for an example of
  * this.
  */
@@ -73,11 +73,11 @@ import {
 } from './proj/transforms.js';
 import {applyTransform, getWidth} from './extent.js';
 import {clamp, modulo} from './math.js';
+import {equals, getWorldsAway} from './coordinate.js';
 import {getDistance} from './sphere.js';
-import {getWorldsAway} from './coordinate.js';
 
 /**
- * A projection as {@link module:ol/proj/Projection}, SRS identifier
+ * A projection as {@link module:ol/proj/Projection~Projection}, SRS identifier
  * string or undefined.
  * @typedef {Projection|string|undefined} ProjectionLike
  * @api
@@ -96,6 +96,16 @@ import {getWorldsAway} from './coordinate.js';
 export {METERS_PER_UNIT};
 
 export {Projection};
+
+let showCoordinateWarning = true;
+
+/**
+ * @param {boolean} [opt_disable = true] Disable console info about `useGeographic()`
+ */
+export function disableCoordinateWarning(opt_disable) {
+  const hide = opt_disable === undefined ? true : opt_disable;
+  showCoordinateWarning = !hide;
+}
 
 /**
  * @param {Array<number>} input Input coordinate array.
@@ -158,7 +168,7 @@ export function addProjections(projections) {
  * @param {ProjectionLike} projectionLike Either a code string which is
  *     a combination of authority and identifier such as "EPSG:4326", or an
  *     existing projection object, or undefined.
- * @return {Projection} Projection object, or null if not in list.
+ * @return {Projection|null} Projection object, or null if not in list.
  * @api
  */
 export function get(projectionLike) {
@@ -171,7 +181,7 @@ export function get(projectionLike) {
  * Get the resolution of the point in degrees or distance units.
  * For projections with degrees as the unit this will simply return the
  * provided resolution. For other projections the point resolution is
- * by default estimated by transforming the 'point' pixel to EPSG:4326,
+ * by default estimated by transforming the `point` pixel to EPSG:4326,
  * measuring its width and height on the normal sphere,
  * and taking the average of the width and height.
  * A custom function can be provided for a specific projection, either
@@ -330,11 +340,10 @@ export function createTransformFromCoordinateTransform(coordTransform) {
       const dimension = opt_dimension !== undefined ? opt_dimension : 2;
       const output = opt_output !== undefined ? opt_output : new Array(length);
       for (let i = 0; i < length; i += dimension) {
-        const point = coordTransform([input[i], input[i + 1]]);
-        output[i] = point[0];
-        output[i + 1] = point[1];
-        for (let j = dimension - 1; j >= 2; --j) {
-          output[i + j] = input[i + j];
+        const point = coordTransform(input.slice(i, i + dimension));
+        const pointLength = point.length;
+        for (let j = 0, jj = dimension; j < jj; ++j) {
+          output[i + j] = j >= pointLength ? input[i + j] : point[j];
         }
       }
       return output;
@@ -358,7 +367,10 @@ export function createTransformFromCoordinateTransform(coordTransform) {
  * @param {function(import("./coordinate.js").Coordinate): import("./coordinate.js").Coordinate} inverse The inverse transform
  *     function (that is, from the destination projection to the source
  *     projection) that takes a {@link module:ol/coordinate~Coordinate} as argument and returns
- *     the transformed {@link module:ol/coordinate~Coordinate}.
+ *     the transformed {@link module:ol/coordinate~Coordinate}. If the transform function can only
+ *     transform less dimensions than the input coordinate, it is supposeed to return a coordinate
+ *     with only the length it can transform. The other dimensions will be taken unchanged from the
+ *     source.
  * @api
  */
 export function addCoordinateTransforms(source, destination, forward, inverse) {
@@ -386,6 +398,7 @@ export function addCoordinateTransforms(source, destination, forward, inverse) {
  * @api
  */
 export function fromLonLat(coordinate, opt_projection) {
+  disableCoordinateWarning();
   return transform(
     coordinate,
     'EPSG:4326',
@@ -533,24 +546,23 @@ export function transformWithProjections(
 }
 
 /**
- * @type {?Projection}
+ * @type {Projection|null}
  */
 let userProjection = null;
 
 /**
  * Set the projection for coordinates supplied from and returned by API methods.
- * Note that this method is not yet a part of the stable API.  Support for user
- * projections is not yet complete and should be considered experimental.
+ * This includes all API methods except for those interacting with tile grids.
  * @param {ProjectionLike} projection The user projection.
+ * @api
  */
 export function setUserProjection(projection) {
   userProjection = get(projection);
 }
 
 /**
- * Clear the user projection if set.  Note that this method is not yet a part of
- * the stable API.  Support for user projections is not yet complete and should
- * be considered experimental.
+ * Clear the user projection if set.
+ * @api
  */
 export function clearUserProjection() {
   userProjection = null;
@@ -560,16 +572,17 @@ export function clearUserProjection() {
  * Get the projection for coordinates supplied from and returned by API methods.
  * Note that this method is not yet a part of the stable API.  Support for user
  * projections is not yet complete and should be considered experimental.
- * @return {?Projection} The user projection (or null if not set).
+ * @return {Projection|null} The user projection (or null if not set).
+ * @api
  */
 export function getUserProjection() {
   return userProjection;
 }
 
 /**
- * Use geographic coordinates (WGS-84 datum) in API methods.  Note that this
- * method is not yet a part of the stable API.  Support for user projections is
- * not yet complete and should be considered experimental.
+ * Use geographic coordinates (WGS-84 datum) in API methods.  This includes all API
+ * methods except for those interacting with tile grids.
+ * @api
  */
 export function useGeographic() {
   setUserProjection('EPSG:4326');
@@ -598,6 +611,20 @@ export function toUserCoordinate(coordinate, sourceProjection) {
  */
 export function fromUserCoordinate(coordinate, destProjection) {
   if (!userProjection) {
+    if (
+      showCoordinateWarning &&
+      !equals(coordinate, [0, 0]) &&
+      coordinate[0] >= -180 &&
+      coordinate[0] <= 180 &&
+      coordinate[1] >= -90 &&
+      coordinate[1] <= 90
+    ) {
+      showCoordinateWarning = false;
+      // eslint-disable-next-line no-console
+      console.warn(
+        'Call useGeographic() from ol/proj once to work with [longitude, latitude] coordinates.'
+      );
+    }
     return coordinate;
   }
   return transform(coordinate, userProjection, destProjection);
@@ -681,20 +708,19 @@ export function fromUserResolution(resolution, destProjection) {
  */
 export function createSafeCoordinateTransform(sourceProj, destProj, transform) {
   return function (coord) {
-    let sourceX = coord[0];
-    let sourceY = coord[1];
     let transformed, worldsAway;
     if (sourceProj.canWrapX()) {
       const sourceExtent = sourceProj.getExtent();
       const sourceExtentWidth = getWidth(sourceExtent);
+      coord = coord.slice(0);
       worldsAway = getWorldsAway(coord, sourceProj, sourceExtentWidth);
       if (worldsAway) {
         // Move x to the real world
-        sourceX = sourceX - worldsAway * sourceExtentWidth;
+        coord[0] = coord[0] - worldsAway * sourceExtentWidth;
       }
-      sourceX = clamp(sourceX, sourceExtent[0], sourceExtent[2]);
-      sourceY = clamp(sourceY, sourceExtent[1], sourceExtent[3]);
-      transformed = transform([sourceX, sourceY]);
+      coord[0] = clamp(coord[0], sourceExtent[0], sourceExtent[2]);
+      coord[1] = clamp(coord[1], sourceExtent[1], sourceExtent[3]);
+      transformed = transform(coord);
     } else {
       transformed = transform(coord);
     }

@@ -17,17 +17,22 @@ import View from '../../../../../../src/ol/View.js';
 import XYZ from '../../../../../../src/ol/source/XYZ.js';
 import {checkedFonts} from '../../../../../../src/ol/render/canvas.js';
 import {create} from '../../../../../../src/ol/transform.js';
+import {createFontStyle} from '../../../util.js';
 import {createXYZ} from '../../../../../../src/ol/tilegrid.js';
 import {getCenter} from '../../../../../../src/ol/extent.js';
 import {get as getProjection} from '../../../../../../src/ol/proj.js';
 import {getUid} from '../../../../../../src/ol/util.js';
 
-describe('ol.renderer.canvas.VectorTileLayer', function () {
+describe('ol/renderer/canvas/VectorTileLayer', function () {
   describe('constructor', function () {
-    const head = document.getElementsByTagName('head')[0];
-    const font = document.createElement('link');
-    font.href = 'https://fonts.googleapis.com/css?family=Dancing+Script';
-    font.rel = 'stylesheet';
+    const fontFamily = 'Ubuntu - VectorTileLayerTest';
+    const font = createFontStyle({
+      fontFamily: fontFamily,
+      src: {
+        url: '/spec/ol/data/fonts/ubuntu-regular-webfont.woff2',
+        format: 'woff2',
+      },
+    });
 
     let map,
       layer,
@@ -200,14 +205,18 @@ describe('ol.renderer.canvas.VectorTileLayer', function () {
     it('re-renders for fonts that become available', function (done) {
       map.renderSync();
       checkedFonts.values_ = {};
-      head.appendChild(font);
-      layerStyle[0].getText().setFont('12px "Dancing Script",sans-serif');
+      font.add();
+      layerStyle[0].getText().setFont(`12px "${fontFamily}",sans-serif`);
       layer.changed();
       const revision = layer.getRevision();
       setTimeout(function () {
-        head.removeChild(font);
-        expect(layer.getRevision()).to.be(revision + 1);
-        done();
+        try {
+          font.remove();
+          expect(layer.getRevision()).to.be(revision + 1);
+          done();
+        } catch (e) {
+          done(e);
+        }
       }, 1600);
     });
 
@@ -243,6 +252,96 @@ describe('ol.renderer.canvas.VectorTileLayer', function () {
         map.removeLayer(map.getLayers().item(1));
         map.renderSync();
         expect(document.querySelector('.ol-layer').childElementCount).to.be(1);
+        done();
+      });
+    });
+
+    it('reuses render container when previous layer has a background', function (done) {
+      map.getLayers().insertAt(
+        0,
+        new TileLayer({
+          background: 'rgb(255, 0, 0)',
+          source: new XYZ({
+            url: 'rendering/ol/data/tiles/osm/{z}/{x}/{y}.png',
+          }),
+        })
+      );
+      map.once('rendercomplete', function () {
+        expect(document.querySelector('.ol-layers').childElementCount).to.be(1);
+        expect(document.querySelector('.ol-layer').childElementCount).to.be(1);
+        map.removeLayer(map.getLayers().item(1));
+        map.renderSync();
+        expect(document.querySelector('.ol-layer').childElementCount).to.be(1);
+        done();
+      });
+    });
+
+    it('does not reuse render container when backgrounds are different', function (done) {
+      map.getLayers().insertAt(
+        0,
+        new TileLayer({
+          background: 'rgb(255, 0, 0)',
+          source: new XYZ({
+            url: 'rendering/ol/data/tiles/osm/{z}/{x}/{y}.png',
+          }),
+        })
+      );
+      map.getLayers().insertAt(
+        0,
+        new TileLayer({
+          background: 'rgba(255, 0, 0, 0.1)',
+          source: new XYZ({
+            url: 'rendering/ol/data/tiles/osm/{z}/{x}/{y}.png',
+          }),
+        })
+      );
+      map.once('rendercomplete', function () {
+        expect(document.querySelector('.ol-layers').childElementCount).to.be(2);
+        expect(document.querySelector('.ol-layer').childElementCount).to.be(1);
+        map.removeLayer(map.getLayers().item(1));
+        map.renderSync();
+        expect(document.querySelector('.ol-layers').childElementCount).to.be(1);
+        done();
+      });
+    });
+
+    it('sets the configured background (string) on the container', function (done) {
+      layer.setBackground('rgba(255, 0, 0, 0.5)');
+      map.once('rendercomplete', function () {
+        expect(layer.getRenderer().container.style.backgroundColor).to.be(
+          'rgba(255, 0, 0, 0.5)'
+        );
+        done();
+      });
+    });
+
+    it('sets the configured background (function) on the container', function (done) {
+      layer.setBackground(function (resolution) {
+        expect(resolution).to.be(map.getView().getResolution());
+        return 'rgba(255, 0, 0, 0.5)';
+      });
+      map.once('rendercomplete', function () {
+        expect(layer.getRenderer().container.style.backgroundColor).to.be(
+          'rgba(255, 0, 0, 0.5)'
+        );
+        done();
+      });
+    });
+
+    it('changes background when function returns a different color', function (done) {
+      let first = true;
+      layer.setBackground(function (resolution) {
+        expect(resolution).to.be(map.getView().getResolution());
+        const background = first === true ? undefined : 'rgba(255, 0, 0, 0.5)';
+        first = false;
+        return background;
+      });
+      map.once('rendercomplete', function () {
+        expect(layer.getRenderer().container.style.backgroundColor).to.be('');
+        map.renderSync();
+        expect(layer.getRenderer().container.style.backgroundColor).to.be(
+          'rgba(255, 0, 0, 0.5)'
+        );
         done();
       });
     });
@@ -299,7 +398,6 @@ describe('ol.renderer.canvas.VectorTileLayer', function () {
       layer.changed();
       renderer.renderFrame(frameState, null);
       expect(replayState.renderedTileRevision).to.be(revision + 1);
-      expect(Object.keys(renderer.tileListenerKeys_).length).to.be(0);
     });
   });
 

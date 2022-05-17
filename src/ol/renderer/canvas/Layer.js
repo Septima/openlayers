@@ -9,6 +9,7 @@ import {
   compose as composeTransform,
   create as createTransform,
 } from '../../transform.js';
+import {asArray} from '../../color.js';
 import {
   containsCoordinate,
   getBottomLeft,
@@ -17,7 +18,19 @@ import {
   getTopRight,
 } from '../../extent.js';
 import {createCanvasContext2D} from '../../dom.js';
-import {cssOpacity} from '../../css.js';
+import {equals} from '../../array.js';
+
+/**
+ * @type {CanvasRenderingContext2D}
+ */
+let pixelContext = null;
+
+function createPixelContext() {
+  const canvas = document.createElement('canvas');
+  canvas.width = 1;
+  canvas.height = 1;
+  pixelContext = canvas.getContext('2d');
+}
 
 /**
  * @abstract
@@ -76,6 +89,54 @@ class CanvasLayerRenderer extends LayerRenderer {
      * @type {boolean}
      */
     this.containerReused = false;
+
+    /**
+     * @private
+     * @type {CanvasRenderingContext2D}
+     */
+    this.pixelContext_ = null;
+
+    /**
+     * @protected
+     * @type {import("../../PluggableMap.js").FrameState|null}
+     */
+    this.frameState = null;
+  }
+
+  /**
+   * @param {HTMLCanvasElement|HTMLImageElement|HTMLVideoElement} image Image.
+   * @param {number} col The column index.
+   * @param {number} row The row index.
+   * @return {Uint8ClampedArray|null} The image data.
+   */
+  getImageData(image, col, row) {
+    if (!pixelContext) {
+      createPixelContext();
+    }
+    pixelContext.clearRect(0, 0, 1, 1);
+
+    let data;
+    try {
+      pixelContext.drawImage(image, col, row, 1, 1, 0, 0, 1, 1);
+      data = pixelContext.getImageData(0, 0, 1, 1).data;
+    } catch (err) {
+      pixelContext = null;
+      return null;
+    }
+    return data;
+  }
+
+  /**
+   * @param {import('../../PluggableMap.js').FrameState} frameState Frame state.
+   * @return {string} Background color.
+   */
+  getBackground(frameState) {
+    const layer = this.getLayer();
+    let background = layer.getBackground();
+    if (typeof background === 'function') {
+      background = background(frameState.viewState.resolution);
+    }
+    return background || undefined;
   }
 
   /**
@@ -83,25 +144,30 @@ class CanvasLayerRenderer extends LayerRenderer {
    * @param {HTMLElement} target Potential render target.
    * @param {string} transform CSS Transform.
    * @param {number} opacity Opacity.
+   * @param {string} [opt_backgroundColor] Background color.
    */
-  useContainer(target, transform, opacity) {
+  useContainer(target, transform, opacity, opt_backgroundColor) {
     const layerClassName = this.getLayer().getClassName();
     let container, context;
     if (
       target &&
-      target.style.opacity === cssOpacity(opacity) &&
-      target.className === layerClassName
+      target.className === layerClassName &&
+      target.style.opacity === '' &&
+      opacity === 1 &&
+      (!opt_backgroundColor ||
+        (target &&
+          target.style.backgroundColor &&
+          equals(
+            asArray(target.style.backgroundColor),
+            asArray(opt_backgroundColor)
+          )))
     ) {
       const canvas = target.firstElementChild;
       if (canvas instanceof HTMLCanvasElement) {
         context = canvas.getContext('2d');
       }
     }
-    if (
-      context &&
-      (context.canvas.width === 0 ||
-        context.canvas.style.transform === transform)
-    ) {
+    if (context && context.canvas.style.transform === transform) {
       // Container of the previous layer renderer can be used.
       this.container = target;
       this.context = context;
@@ -128,6 +194,13 @@ class CanvasLayerRenderer extends LayerRenderer {
       style.transformOrigin = 'top left';
       this.container = container;
       this.context = context;
+    }
+    if (
+      !this.containerReused &&
+      opt_backgroundColor &&
+      !this.container.style.backgroundColor
+    ) {
+      this.container.style.backgroundColor = opt_backgroundColor;
     }
   }
 
@@ -188,6 +261,7 @@ class CanvasLayerRenderer extends LayerRenderer {
    * @protected
    */
   preRender(context, frameState) {
+    this.frameState = frameState;
     this.dispatchRenderEvent_(RenderEventType.PRERENDER, context, frameState);
   }
 
@@ -268,20 +342,25 @@ class CanvasLayerRenderer extends LayerRenderer {
       }
     }
 
+    const x = Math.round(renderPixel[0]);
+    const y = Math.round(renderPixel[1]);
+    let pixelContext = this.pixelContext_;
+    if (!pixelContext) {
+      const pixelCanvas = document.createElement('canvas');
+      pixelCanvas.width = 1;
+      pixelCanvas.height = 1;
+      pixelContext = pixelCanvas.getContext('2d');
+      this.pixelContext_ = pixelContext;
+    }
+    pixelContext.clearRect(0, 0, 1, 1);
     let data;
     try {
-      const x = Math.round(renderPixel[0]);
-      const y = Math.round(renderPixel[1]);
-      const newCanvas = document.createElement('canvas');
-      const newContext = newCanvas.getContext('2d');
-      newCanvas.width = 1;
-      newCanvas.height = 1;
-      newContext.clearRect(0, 0, 1, 1);
-      newContext.drawImage(context.canvas, x, y, 1, 1, 0, 0, 1, 1);
-      data = newContext.getImageData(0, 0, 1, 1).data;
+      pixelContext.drawImage(context.canvas, x, y, 1, 1, 0, 0, 1, 1);
+      data = pixelContext.getImageData(0, 0, 1, 1).data;
     } catch (err) {
       if (err.name === 'SecurityError') {
         // tainted canvas, we assume there is data at the given pixel (although there might not be)
+        this.pixelContext_ = null;
         return new Uint8Array();
       }
       return data;
@@ -291,6 +370,14 @@ class CanvasLayerRenderer extends LayerRenderer {
       return null;
     }
     return data;
+  }
+
+  /**
+   * Clean up.
+   */
+  disposeInternal() {
+    delete this.frameState;
+    super.disposeInternal();
   }
 }
 

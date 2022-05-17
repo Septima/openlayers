@@ -31,6 +31,7 @@ import {
  * @property {boolean} [rotateWithView=false] Whether to rotate the shape with the view.
  * @property {number|import("../size.js").Size} [scale=1] Scale. Unless two dimensional scaling is required a better
  * result may be obtained with appropriate settings for `radius`, `radius1` and `radius2`.
+ * @property {"declutter"|"obstacle"|"none"|undefined} [declutterMode] Declutter mode
  */
 
 /**
@@ -69,6 +70,7 @@ class RegularShape extends ImageStyle {
       scale: options.scale !== undefined ? options.scale : 1,
       displacement:
         options.displacement !== undefined ? options.displacement : [0, 0],
+      declutterMode: options.declutterMode,
     });
 
     /**
@@ -128,12 +130,6 @@ class RegularShape extends ImageStyle {
 
     /**
      * @private
-     * @type {Array<number>}
-     */
-    this.anchor_ = null;
-
-    /**
-     * @private
      * @type {import("../size.js").Size}
      */
     this.size_ = null;
@@ -165,6 +161,7 @@ class RegularShape extends ImageStyle {
       rotateWithView: this.getRotateWithView(),
       scale: Array.isArray(scale) ? scale.slice() : scale,
       displacement: this.getDisplacement().slice(),
+      declutterMode: this.getDeclutterMode(),
     });
     style.setOpacity(this.getOpacity());
     return style;
@@ -177,7 +174,12 @@ class RegularShape extends ImageStyle {
    * @api
    */
   getAnchor() {
-    return this.anchor_;
+    const size = this.size_;
+    if (!size) {
+      return null;
+    }
+    const displacement = this.getDisplacement();
+    return [size[0] / 2 - displacement[0], size[1] / 2 + displacement[1]];
   }
 
   /**
@@ -467,9 +469,7 @@ class RegularShape extends ImageStyle {
   render() {
     this.renderOptions_ = this.createRenderOptions();
     const size = this.renderOptions_.size;
-    const displacement = this.getDisplacement();
     this.canvas_ = {};
-    this.anchor_ = [size / 2 - displacement[0], size / 2 + displacement[1]];
     this.size_ = [size, size];
   }
 

@@ -19,9 +19,10 @@ import {
   create as createTransform,
   makeInverse as makeInverseTransform,
   multiply as multiplyTransform,
+  translate as translateTransform,
 } from '../../transform.js';
 import {assert} from '../../asserts.js';
-import {buffer, createEmpty, equals} from '../../extent.js';
+import {buffer, createEmpty, equals, getWidth} from '../../extent.js';
 import {create as createWebGLWorker} from '../../worker/webgl.js';
 import {getUid} from '../../util.js';
 import {listen, unlistenByKey} from '../../events.js';
@@ -55,7 +56,7 @@ import {listen, unlistenByKey} from '../../events.js';
  * @property {string} [hitVertexShader] Vertex shader source for hit detection rendering.
  * @property {string} [hitFragmentShader] Fragment shader source for hit detection rendering.
  * @property {Object<string,import("../../webgl/Helper").UniformValue>} [uniforms] Uniform definitions for the post process steps
- * Please note that `u_texture` is reserved for the main texture slot.
+ * Please note that `u_texture` is reserved for the main texture slot and `u_opacity` is reserved for the layer opacity.
  * @property {Array<import("./Layer").PostProcessesOptions>} [postProcesses] Post-processes definitions
  */
 
@@ -66,7 +67,7 @@ import {listen, unlistenByKey} from '../../events.js';
  * every time the vector source changes.
  *
  * You need to provide vertex and fragment shaders for rendering. This can be done using
- * {@link module:ol/webgl/ShaderBuilder} utilities. These shaders shall expect a `a_position` attribute
+ * {@link module:ol/webgl/ShaderBuilder~ShaderBuilder} utilities. These shaders shall expect a `a_position` attribute
  * containing the screen-space projected center of the quad, as well as a `a_index` attribute
  * whose value (0, 1, 2 or 3) indicates which quad vertex is currently getting processed (see structure below).
  *
@@ -99,6 +100,7 @@ import {listen, unlistenByKey} from '../../events.js';
  * the final color that will have to be output for hit detection to work.
  *
  * The following uniform is used for the main texture: `u_texture`.
+ * The following uniform is used for the layer opacity: `u_opacity`.
  *
  * Please note that the main shader output should have premultiplied alpha, otherwise visual anomalies may occur.
  *
@@ -132,10 +134,11 @@ class WebGLPointsLayerRenderer extends WebGLLayerRenderer {
     uniforms[DefaultUniform.PROJECTION_MATRIX] = projectionMatrixTransform;
 
     super(layer, {
-      className: options.className,
       uniforms: uniforms,
       postProcesses: options.postProcesses,
     });
+
+    this.ready = false;
 
     this.sourceRevision_ = -1;
 
@@ -146,10 +149,21 @@ class WebGLPointsLayerRenderer extends WebGLLayerRenderer {
       DYNAMIC_DRAW
     );
 
-    this.program_ = this.helper.getProgram(
-      options.fragmentShader,
-      options.vertexShader
-    );
+    /**
+     * @private
+     */
+    this.vertexShader_ = options.vertexShader;
+
+    /**
+     * @private
+     */
+    this.fragmentShader_ = options.fragmentShader;
+
+    /**
+     * @type {WebGLProgram}
+     * @private
+     */
+    this.program_;
 
     /**
      * @type {boolean}
@@ -158,12 +172,21 @@ class WebGLPointsLayerRenderer extends WebGLLayerRenderer {
     this.hitDetectionEnabled_ =
       options.hitFragmentShader && options.hitVertexShader ? true : false;
 
-    this.hitProgram_ =
-      this.hitDetectionEnabled_ &&
-      this.helper.getProgram(
-        options.hitFragmentShader,
-        options.hitVertexShader
-      );
+    /**
+     * @private
+     */
+    this.hitVertexShader_ = options.hitVertexShader;
+
+    /**
+     * @private
+     */
+    this.hitFragmentShader_ = options.hitFragmentShader;
+
+    /**
+     * @type {WebGLProgram}
+     * @private
+     */
+    this.hitProgram_;
 
     const customAttributes = options.attributes
       ? options.attributes.map(function (attribute) {
@@ -263,8 +286,14 @@ class WebGLPointsLayerRenderer extends WebGLLayerRenderer {
      * @type {WebGLRenderTarget}
      * @private
      */
-    this.hitRenderTarget_ =
-      this.hitDetectionEnabled_ && new WebGLRenderTarget(this.helper);
+    this.hitRenderTarget_;
+
+    /**
+     * Keep track of latest message sent to worker
+     * @type {number}
+     * @private
+     */
+    this.generateBuffersRun_ = 0;
 
     this.worker_ = createWebGLWorker();
     this.worker_.addEventListener(
@@ -300,6 +329,9 @@ class WebGLPointsLayerRenderer extends WebGLLayerRenderer {
             this.renderInstructions_ = new Float32Array(
               event.data.renderInstructions
             );
+            if (received.generateBuffersRun === this.generateBuffersRun_) {
+              this.ready = true;
+            }
           }
 
           this.getLayer().changed();
@@ -360,6 +392,22 @@ class WebGLPointsLayerRenderer extends WebGLLayerRenderer {
     );
   }
 
+  afterHelperCreated() {
+    this.program_ = this.helper.getProgram(
+      this.fragmentShader_,
+      this.vertexShader_
+    );
+
+    if (this.hitDetectionEnabled_) {
+      this.hitProgram_ = this.helper.getProgram(
+        this.hitFragmentShader_,
+        this.hitVertexShader_
+      );
+
+      this.hitRenderTarget_ = new WebGLRenderTarget(this.helper);
+    }
+  }
+
   /**
    * @param {import("../../source/Vector.js").VectorSourceEvent} event Event.
    * @private
@@ -411,35 +459,62 @@ class WebGLPointsLayerRenderer extends WebGLLayerRenderer {
    * @return {HTMLElement} The rendered element.
    */
   renderFrame(frameState) {
-    this.preRender(frameState);
+    const gl = this.helper.getGL();
+    this.preRender(gl, frameState);
 
+    const projection = frameState.viewState.projection;
+    const layer = this.getLayer();
+    const vectorSource = layer.getSource();
+    // FIXME fix hit detection isn't reliable when rendering multiple worlds
+    const multiWorld = vectorSource.getWrapX() && projection.canWrapX();
+    const projectionExtent = projection.getExtent();
+
+    const extent = frameState.extent;
+    const worldWidth = multiWorld ? getWidth(projectionExtent) : null;
+    const endWorld = multiWorld
+      ? Math.ceil((extent[2] - projectionExtent[2]) / worldWidth) + 1
+      : 1;
+
+    const startWorld = multiWorld
+      ? Math.floor((extent[0] - projectionExtent[0]) / worldWidth)
+      : 0;
+
+    let world = startWorld;
     const renderCount = this.indicesBuffer_.getSize();
-    this.helper.drawElements(0, renderCount);
-    this.helper.finalizeDraw(frameState);
+
+    do {
+      // apply the current projection transform with the invert of the one used to fill buffers
+      this.helper.makeProjectionTransform(frameState, this.currentTransform_);
+      translateTransform(this.currentTransform_, world * worldWidth, 0);
+      multiplyTransform(this.currentTransform_, this.invertRenderTransform_);
+      this.helper.applyUniforms(frameState);
+
+      this.helper.drawElements(0, renderCount);
+    } while (++world < endWorld);
+
+    this.helper.finalizeDraw(
+      frameState,
+      this.dispatchPreComposeEvent,
+      this.dispatchPostComposeEvent
+    );
     const canvas = this.helper.getCanvas();
 
-    const layerState = frameState.layerStatesArray[frameState.layerIndex];
-    const opacity = layerState.opacity;
-    if (opacity !== parseFloat(canvas.style.opacity)) {
-      canvas.style.opacity = String(opacity);
-    }
-
     if (this.hitDetectionEnabled_) {
-      this.renderHitDetection(frameState);
+      this.renderHitDetection(frameState, startWorld, endWorld, worldWidth);
       this.hitRenderTarget_.clearCachedData();
     }
 
-    this.postRender(frameState);
+    this.postRender(gl, frameState);
 
     return canvas;
   }
 
   /**
-   * Determine whether render should be called.
+   * Determine whether renderFrame should be called.
    * @param {import("../../PluggableMap.js").FrameState} frameState Frame state.
    * @return {boolean} Layer is ready to be rendered.
    */
-  prepareFrame(frameState) {
+  prepareFrameInternal(frameState) {
     const layer = this.getLayer();
     const vectorSource = layer.getSource();
     const viewState = frameState.viewState;
@@ -466,17 +541,12 @@ class WebGLPointsLayerRenderer extends WebGLLayerRenderer {
       this.previousExtent_ = frameState.extent.slice();
     }
 
-    // apply the current projection transform with the invert of the one used to fill buffers
-    this.helper.makeProjectionTransform(frameState, this.currentTransform_);
-    multiplyTransform(this.currentTransform_, this.invertRenderTransform_);
-
     this.helper.useProgram(this.program_);
     this.helper.prepareDraw(frameState);
 
     // write new data
     this.helper.bindBuffer(this.verticesBuffer_);
     this.helper.bindBuffer(this.indicesBuffer_);
-
     this.helper.enableAttributes(this.attributes);
 
     return true;
@@ -576,6 +646,8 @@ class WebGLPointsLayerRenderer extends WebGLLayerRenderer {
     };
     // additional properties will be sent back as-is by the worker
     message['projectionTransform'] = projectionTransform;
+    message['generateBuffersRun'] = ++this.generateBuffersRun_;
+    this.ready = false;
     this.worker_.postMessage(message, [this.renderInstructions_.buffer]);
     this.renderInstructions_ = null;
 
@@ -638,12 +710,17 @@ class WebGLPointsLayerRenderer extends WebGLLayerRenderer {
   /**
    * Render the hit detection data to the corresponding render target
    * @param {import("../../PluggableMap.js").FrameState} frameState current frame state
+   * @param {number} startWorld the world to render in the first iteration
+   * @param {number} endWorld the last world to render
+   * @param {number} worldWidth the width of the worlds being rendered
    */
-  renderHitDetection(frameState) {
+  renderHitDetection(frameState, startWorld, endWorld, worldWidth) {
     // skip render entirely if vertex buffers not ready/generated yet
     if (!this.hitVerticesBuffer_.getSize()) {
       return;
     }
+
+    let world = startWorld;
 
     this.hitRenderTarget_.setSize([
       Math.floor(frameState.size[0] / 2),
@@ -659,11 +736,17 @@ class WebGLPointsLayerRenderer extends WebGLLayerRenderer {
 
     this.helper.bindBuffer(this.hitVerticesBuffer_);
     this.helper.bindBuffer(this.indicesBuffer_);
-
     this.helper.enableAttributes(this.hitDetectionAttributes);
 
-    const renderCount = this.indicesBuffer_.getSize();
-    this.helper.drawElements(0, renderCount);
+    do {
+      this.helper.makeProjectionTransform(frameState, this.currentTransform_);
+      translateTransform(this.currentTransform_, world * worldWidth, 0);
+      multiplyTransform(this.currentTransform_, this.invertRenderTransform_);
+      this.helper.applyUniforms(frameState);
+
+      const renderCount = this.indicesBuffer_.getSize();
+      this.helper.drawElements(0, renderCount);
+    } while (++world < endWorld);
   }
 
   /**

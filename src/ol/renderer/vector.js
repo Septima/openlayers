@@ -8,9 +8,9 @@ import {getUid} from '../util.js';
 
 /**
  * Feature callback. The callback will be called with three arguments. The first
- * argument is one {@link module:ol/Feature feature} or {@link module:ol/render/Feature render feature}
- * at the pixel, the second is the {@link module:ol/layer/Layer layer} of the feature and will be null for
- * unmanaged layers. The third is the {@link module:ol/geom/SimpleGeometry} of the feature. For features
+ * argument is one {@link module:ol/Feature~Feature feature} or {@link module:ol/render/Feature~RenderFeature render feature}
+ * at the pixel, the second is the {@link module:ol/layer/Layer~Layer layer} of the feature and will be null for
+ * unmanaged layers. The third is the {@link module:ol/geom/SimpleGeometry~SimpleGeometry} of the feature. For features
  * with a GeometryCollection geometry, it will be the first detected geometry from the collection.
  * @template T
  * @typedef {function(import("../Feature.js").FeatureLike, import("../layer/Layer.js").default<import("../source/Source").default>, import("../geom/SimpleGeometry.js").default): T} FeatureCallback
@@ -208,7 +208,8 @@ function renderGeometry(replayGroup, geometry, style, feature) {
   replay.drawCustom(
     /** @type {import("../geom/SimpleGeometry.js").default} */ (geometry),
     feature,
-    style.getRenderer()
+    style.getRenderer(),
+    style.getHitDetectionRenderer()
   );
 }
 
@@ -361,16 +362,29 @@ function renderPointGeometry(
   const textStyle = style.getText();
   /** @type {import("../render/canvas.js").DeclutterImageWithText} */
   let declutterImageWithText;
-  if (opt_declutterBuilderGroup) {
-    builderGroup = opt_declutterBuilderGroup;
-    declutterImageWithText =
-      imageStyle && textStyle && textStyle.getText() ? {} : undefined;
-  }
   if (imageStyle) {
     if (imageStyle.getImageState() != ImageState.LOADED) {
       return;
     }
-    const imageReplay = builderGroup.getBuilder(
+    let imageBuilderGroup = builderGroup;
+    if (opt_declutterBuilderGroup) {
+      const declutterMode = imageStyle.getDeclutterMode();
+      if (declutterMode !== 'none') {
+        imageBuilderGroup = opt_declutterBuilderGroup;
+        if (declutterMode === 'obstacle') {
+          // draw in non-declutter group:
+          const imageReplay = builderGroup.getBuilder(
+            style.getZIndex(),
+            BuilderType.IMAGE
+          );
+          imageReplay.setImageStyle(imageStyle, declutterImageWithText);
+          imageReplay.drawPoint(geometry, feature);
+        } else if (textStyle && textStyle.getText()) {
+          declutterImageWithText = {};
+        }
+      }
+    }
+    const imageReplay = imageBuilderGroup.getBuilder(
       style.getZIndex(),
       BuilderType.IMAGE
     );
@@ -378,7 +392,11 @@ function renderPointGeometry(
     imageReplay.drawPoint(geometry, feature);
   }
   if (textStyle && textStyle.getText()) {
-    const textReplay = builderGroup.getBuilder(
+    let textBuilderGroup = builderGroup;
+    if (opt_declutterBuilderGroup) {
+      textBuilderGroup = opt_declutterBuilderGroup;
+    }
+    const textReplay = textBuilderGroup.getBuilder(
       style.getZIndex(),
       BuilderType.TEXT
     );
@@ -405,16 +423,29 @@ function renderMultiPointGeometry(
   const textStyle = style.getText();
   /** @type {import("../render/canvas.js").DeclutterImageWithText} */
   let declutterImageWithText;
-  if (opt_declutterBuilderGroup) {
-    builderGroup = opt_declutterBuilderGroup;
-    declutterImageWithText =
-      imageStyle && textStyle && textStyle.getText() ? {} : undefined;
-  }
   if (imageStyle) {
     if (imageStyle.getImageState() != ImageState.LOADED) {
       return;
     }
-    const imageReplay = builderGroup.getBuilder(
+    let imageBuilderGroup = builderGroup;
+    if (opt_declutterBuilderGroup) {
+      const declutterMode = imageStyle.getDeclutterMode();
+      if (declutterMode !== 'none') {
+        imageBuilderGroup = opt_declutterBuilderGroup;
+        if (declutterMode === 'obstacle') {
+          // draw in non-declutter group:
+          const imageReplay = builderGroup.getBuilder(
+            style.getZIndex(),
+            BuilderType.IMAGE
+          );
+          imageReplay.setImageStyle(imageStyle, declutterImageWithText);
+          imageReplay.drawMultiPoint(geometry, feature);
+        } else if (textStyle && textStyle.getText()) {
+          declutterImageWithText = {};
+        }
+      }
+    }
+    const imageReplay = imageBuilderGroup.getBuilder(
       style.getZIndex(),
       BuilderType.IMAGE
     );
@@ -422,7 +453,11 @@ function renderMultiPointGeometry(
     imageReplay.drawMultiPoint(geometry, feature);
   }
   if (textStyle && textStyle.getText()) {
-    const textReplay = (opt_declutterBuilderGroup || builderGroup).getBuilder(
+    let textBuilderGroup = builderGroup;
+    if (opt_declutterBuilderGroup) {
+      textBuilderGroup = opt_declutterBuilderGroup;
+    }
+    const textReplay = textBuilderGroup.getBuilder(
       style.getZIndex(),
       BuilderType.TEXT
     );
